@@ -9,6 +9,8 @@ import sys
 import json
 import shutil
 import urllib.request
+import zipfile
+import tempfile
 from pathlib import Path
 
 # ── Config persistence ─────────────────────────────────────────────────────────
@@ -19,8 +21,17 @@ else:
 
 CONFIG_FILE = _BASE / "dlp-ui-config.json"
 
+VERSION = "1.0.0"
+GITHUB_REPO     = "erar404/dlp-gui"
+APP_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
 YTDLP_RELEASE_URL = (
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+)
+
+FFMPEG_RELEASE_URL = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/"
+    "ffmpeg-master-latest-win64-lgpl.zip"
 )
 
 COMMON_YTDLP_PATHS = [
@@ -30,7 +41,17 @@ COMMON_YTDLP_PATHS = [
     str(Path.home() / "yt-dlp" / "yt-dlp.exe"),
     str(Path.home() / "AppData" / "Local" / "Programs" / "yt-dlp" / "yt-dlp.exe"),
     str(Path.home() / "AppData" / "Local" / "yt-dlp" / "yt-dlp.exe"),
+    str(_BASE / "yt-dlp" / "yt-dlp.exe"),
     str(_BASE / "yt-dlp.exe"),
+]
+
+COMMON_FFMPEG_PATHS = [
+    r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+    r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+    str(Path.home() / "ffmpeg" / "bin" / "ffmpeg.exe"),
+    str(Path.home() / "AppData" / "Local" / "Programs" / "ffmpeg" / "bin" / "ffmpeg.exe"),
+    str(_BASE / "ffmpeg" / "ffmpeg.exe"),
+    str(_BASE / "ffmpeg.exe"),
 ]
 
 
@@ -62,14 +83,53 @@ def find_ytdlp() -> str:
     found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
     if found:
         return found
+    if getattr(sys, "frozen", False):
+        p = Path(sys._MEIPASS) / "yt-dlp.exe"
+        if p.exists():
+            return str(p)
     for p in COMMON_YTDLP_PATHS:
         if os.path.isfile(p):
             return p
     return ""
 
 
+def find_ffmpeg() -> str:
+    """Return the first valid ffmpeg executable path, or empty string."""
+    found = shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+    if found:
+        return found
+    if getattr(sys, "frozen", False):
+        p = Path(sys._MEIPASS) / "ffmpeg" / "ffmpeg.exe"
+        if p.exists():
+            return str(p)
+    for p in COMMON_FFMPEG_PATHS:
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def _extract_bundled():
+    """Copy deps bundled inside the PyInstaller EXE next to it on first launch."""
+    if not getattr(sys, "frozen", False):
+        return
+    bundle = Path(sys._MEIPASS)
+    pairs = [
+        (bundle / "yt-dlp.exe",            _BASE / "yt-dlp"  / "yt-dlp.exe"),
+        (bundle / "ffmpeg" / "ffmpeg.exe",  _BASE / "ffmpeg"  / "ffmpeg.exe"),
+        (bundle / "ffmpeg" / "ffprobe.exe", _BASE / "ffmpeg"  / "ffprobe.exe"),
+    ]
+    for src, dst in pairs:
+        try:
+            if src.exists() and not dst.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dst))
+        except Exception:
+            pass  # Non-fatal — sys._MEIPASS fallback still works
+
+_extract_bundled()
 _cfg = _load_config()
 YT_DLP = _cfg.get("ytdlp_path") or find_ytdlp()
+FFMPEG  = _cfg.get("ffmpeg_path") or find_ffmpeg()
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
 BG0  = "#121212"
@@ -221,12 +281,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("YT-DLP Downloader")
-        self.geometry("660x770")
-        self.resizable(False, False)
+        self.geometry("680x820")
+        self.minsize(580, 480)
         self.configure(bg=BG0)
         self.proc = None
         self._q = queue.Queue()
         self.ytdlp_path = YT_DLP
+        self.ffmpeg_path = FFMPEG
         self._build()
         self._poll()
 
@@ -249,7 +310,7 @@ class App(tk.Tk):
                   background=[("readonly", BG2)],
                   foreground=[("readonly", FG0)])
 
-        nb = ttk.Notebook(self)
+        self._nb = nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True)
 
         self.tab_dl  = tk.Frame(nb, bg=BG0)
@@ -260,103 +321,105 @@ class App(tk.Tk):
         self._build_download()
         self._build_settings()
 
-    # ── Widget helpers ─────────────────────────────────────────────────────────
-    def _lbl(self, p, text, x, y):
-        tk.Label(p, text=text, bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=x, y=y)
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-    def _entry(self, p, x, y, w, ph=None):
-        e = PlaceholderEntry(p, placeholder=ph or "",
-                             bg=BG2, fg=FG0, insertbackground=FG0,
-                             relief="solid", bd=1, font=("Segoe UI", 9))
-        e.place(x=x, y=y, width=w, height=28)
-        return e
+    # ── Scrolling ──────────────────────────────────────────────────────────────
+    def _on_tab_changed(self, _=None):
+        if self._nb.index(self._nb.select()) == 1:
+            self.bind_all("<MouseWheel>", self._scroll_cfg)
+        else:
+            self.unbind_all("<MouseWheel>")
 
-    def _plain_entry(self, p, x, y, w, default=""):
-        e = tk.Entry(p, bg=BG2, fg=FG0, insertbackground=FG0,
-                     relief="solid", bd=1, font=("Segoe UI", 9))
-        e.place(x=x, y=y, width=w, height=28)
-        if default:
-            e.insert(0, default)
-        return e
-
-    def _combo(self, p, x, y, w, values):
-        c = ttk.Combobox(p, values=values, state="readonly", font=("Segoe UI", 9))
-        c.place(x=x, y=y, width=w, height=26)
-        c.current(0)
-        return c
-
-    def _btn(self, p, text, x, y, w, h, bg, fg, border, cmd, font=None):
-        b = tk.Button(p, text=text, bg=bg, fg=fg, relief="flat", bd=0,
-                      cursor="hand2", font=font or ("Segoe UI", 9), command=cmd,
-                      highlightthickness=1, highlightbackground=border,
-                      activebackground=BG3, activeforeground=FG0)
-        b.place(x=x, y=y, width=w, height=h)
-        return b
-
-    def _check(self, p, text, x, y):
-        var = tk.BooleanVar()
-        tk.Checkbutton(p, text=text, variable=var, bg=BG0, fg=FG1,
-                       selectcolor=BG2, activebackground=BG0, activeforeground=FG0,
-                       font=("Segoe UI", 10)).place(x=x, y=y)
-        return var
-
-    def _group(self, p, text, x, y, w, h):
-        f = tk.LabelFrame(p, text=text, bg=BG0, fg=FG1,
-                          bd=1, relief="groove", font=("Segoe UI", 9))
-        f.place(x=x, y=y, width=w, height=h)
-        return f
-
-    def _spinbox(self, p, x, y, w, lo, hi, default):
-        s = tk.Spinbox(p, from_=lo, to=hi, bg=BG2, fg=FG0,
-                       insertbackground=FG0, buttonbackground=BG3,
-                       relief="solid", bd=1, font=("Segoe UI", 9))
-        s.place(x=x, y=y, width=w, height=26)
-        s.delete(0, "end")
-        s.insert(0, str(default))
-        return s
+    def _scroll_cfg(self, e):
+        self._cfg_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
 
     # ── Download tab ───────────────────────────────────────────────────────────
     def _build_download(self):
         p = self.tab_dl
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(7, weight=1)   # log row expands
 
-        self._lbl(p, "YouTube / Video URL", 16, 16)
-        self.txt_url = self._entry(p, 16, 38, 618, "Paste a link here...")
+        # URL
+        tk.Label(p, text="YouTube / Video URL", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 10)).grid(row=0, column=0, padx=16, pady=(14, 3), sticky="W")
+        self.txt_url = PlaceholderEntry(
+            p, placeholder="Paste a link here...",
+            bg=BG2, fg=FG0, insertbackground=FG0,
+            relief="solid", bd=1, font=("Segoe UI", 9))
+        self.txt_url.grid(row=1, column=0, padx=16, sticky="EW", ipady=5)
 
-        self._lbl(p, "Format", 16, 82)
-        self._lbl(p, "Quality / Resolution", 320, 82)
-        self.cbo_fmt  = self._combo(p, 16, 102, 296, list(FORMAT_TYPES))
-        self.cbo_qual = self._combo(p, 320, 102, 314, list(VIDEO_QUALITIES))
+        # Format / Quality
+        fq = tk.Frame(p, bg=BG0)
+        fq.grid(row=2, column=0, padx=16, pady=(10, 0), sticky="EW")
+        fq.columnconfigure(0, weight=1)
+        fq.columnconfigure(1, weight=1)
+        tk.Label(fq, text="Format", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 10)).grid(row=0, column=0, sticky="W")
+        tk.Label(fq, text="Quality / Resolution", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 10)).grid(row=0, column=1, padx=(10, 0), sticky="W")
+        self.cbo_fmt = ttk.Combobox(fq, values=list(FORMAT_TYPES),
+                                     state="readonly", font=("Segoe UI", 9))
+        self.cbo_fmt.grid(row=1, column=0, sticky="EW", ipady=2, pady=(3, 0))
+        self.cbo_fmt.current(0)
+        self.cbo_qual = ttk.Combobox(fq, values=list(VIDEO_QUALITIES),
+                                      state="readonly", font=("Segoe UI", 9))
+        self.cbo_qual.grid(row=1, column=1, sticky="EW", padx=(10, 0), ipady=2, pady=(3, 0))
+        self.cbo_qual.current(0)
         self.cbo_fmt.bind("<<ComboboxSelected>>", self._fmt_changed)
 
-        self._lbl(p, "Destination Folder", 16, 148)
-        self.txt_dest = self._plain_entry(p, 16, 168, 522,
-                                          str(Path.home() / "Videos"))
-        self._btn(p, "Browse...", 546, 167, 88, 30, BG2, FG0, BG3, self._browse)
+        # Destination
+        tk.Label(p, text="Destination Folder", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 10)).grid(row=3, column=0, padx=16, pady=(10, 3), sticky="W")
+        dest = tk.Frame(p, bg=BG0)
+        dest.grid(row=4, column=0, padx=16, sticky="EW")
+        dest.columnconfigure(0, weight=1)
+        self.txt_dest = tk.Entry(dest, bg=BG2, fg=FG0, insertbackground=FG0,
+                                  relief="solid", bd=1, font=("Segoe UI", 9))
+        self.txt_dest.insert(0, str(Path.home() / "Videos"))
+        self.txt_dest.grid(row=0, column=0, sticky="EW", ipady=5)
+        tk.Button(dest, text="Browse...", bg=BG2, fg=FG0, relief="flat", bd=0,
+                  cursor="hand2", font=("Segoe UI", 9), command=self._browse,
+                  highlightthickness=1, highlightbackground=BG3,
+                  activebackground=BG3, activeforeground=FG0).grid(
+                      row=0, column=1, padx=(6, 0), ipady=5)
 
-        self.btn_dl = self._btn(p, "Download", 16, 212, 618, 44,
-                                RED, FG0, RED, self._start,
-                                font=("Segoe UI Semibold", 11))
+        # Download button
+        self.btn_dl = tk.Button(
+            p, text="Download", bg=RED, fg=FG0, relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI Semibold", 11), command=self._start,
+            highlightthickness=1, highlightbackground=RED,
+            activebackground="#b91c1c", activeforeground=FG0)
+        self.btn_dl.grid(row=5, column=0, padx=16, pady=(10, 0), sticky="EW", ipady=10)
 
-        self._lbl(p, "Output Log", 16, 270)
-        self.log = tk.Text(p, bg="#0a0a0a", fg=LOG_GRAY, state="disabled",
-                           relief="flat", bd=0, wrap="word",
-                           font=self._mono())
-        self.log.place(x=16, y=290, width=618, height=360)
+        # Log
+        tk.Label(p, text="Output Log", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 10)).grid(row=6, column=0, padx=16, pady=(12, 3), sticky="W")
+        log_f = tk.Frame(p, bg=BG0)
+        log_f.grid(row=7, column=0, padx=16, sticky="NSEW")
+        log_f.columnconfigure(0, weight=1)
+        log_f.rowconfigure(0, weight=1)
 
-        sb = tk.Scrollbar(p, command=self.log.yview, bg=BG2, troughcolor=BG1,
+        self.log = tk.Text(log_f, bg="#0a0a0a", fg=LOG_GRAY, state="disabled",
+                           relief="flat", bd=0, wrap="word", font=self._mono())
+        self.log.grid(row=0, column=0, sticky="NSEW")
+
+        sb = tk.Scrollbar(log_f, command=self.log.yview, bg=BG2, troughcolor=BG1,
                           activebackground=BG3)
-        sb.place(x=634, y=290, width=12, height=360)
+        sb.grid(row=0, column=1, sticky="NS")
         self.log.config(yscrollcommand=sb.set)
 
-        for tag, color in [("err",  LOG_RED),   ("dl",   LOG_GREEN),
-                            ("info", BLUE),       ("gray", LOG_GRAY),
-                            ("blue", BLUE),       ("ok",   LOG_OK),
+        for tag, color in [("err",  LOG_RED),  ("dl",   LOG_GREEN),
+                            ("info", BLUE),      ("gray", LOG_GRAY),
+                            ("blue", BLUE),      ("ok",   LOG_OK),
                             ("fail", LOG_FAIL)]:
             self.log.tag_configure(tag, foreground=color)
 
-        self._btn(p, "Clear log", 16, 658, 618, 24, BG1, FG2, BG2,
-                  self._clear, font=("Segoe UI", 8))
+        # Clear log
+        tk.Button(p, text="Clear log", bg=BG1, fg=FG2, relief="flat", bd=0,
+                  cursor="hand2", font=("Segoe UI", 8), command=self._clear,
+                  highlightthickness=1, highlightbackground=BG2,
+                  activebackground=BG3, activeforeground=FG0).grid(
+                      row=8, column=0, padx=16, pady=(4, 10), sticky="EW")
 
     def _mono(self):
         try:
@@ -368,94 +431,251 @@ class App(tk.Tk):
     # ── Settings tab ──────────────────────────────────────────────────────────
     def _build_settings(self):
         p = self.tab_cfg
+        p.columnconfigure(0, weight=1)
+        p.rowconfigure(0, weight=1)
 
-        # yt-dlp Executable  (y=10, h=92)
-        # First row at y=18 clears the LabelFrame border (~14 px from top).
-        # Status label gets explicit width + wraplength so long messages wrap
-        # instead of overflowing the frame edge and getting clipped.
-        g = self._group(p, "yt-dlp Executable", 10, 10, 630, 92)
-        self.txt_ytdlp = self._plain_entry(g, 0, 18, 290, self.ytdlp_path)
-        self._btn(g, "Browse...", 296, 18, 74, 26, BG2, FG0, BG3,
-                  self._browse_ytdlp)
-        self._btn(g, "Auto-detect", 376, 18, 84, 26, BG2, FG0, BG3,
-                  self._autodetect_ytdlp)
-        self.btn_get_ytdlp = self._btn(g, "↓ Get yt-dlp", 466, 18, 140, 26,
-                                        BG2, FG0, BG3, self._download_ytdlp)
-        self.lbl_ytdlp_status = tk.Label(g, text="", bg=BG0,
-                                          font=("Segoe UI", 9),
-                                          wraplength=610, justify="left")
-        self.lbl_ytdlp_status.place(x=2, y=52, width=610)
+        # ── Scrollable canvas ──────────────────────────────────────────────────
+        self._cfg_canvas = canvas = tk.Canvas(p, bg=BG0, highlightthickness=0)
+        vsb = tk.Scrollbar(p, orient="vertical", command=canvas.yview,
+                           bg=BG2, troughcolor=BG1, activebackground=BG3)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.grid(row=0, column=1, sticky="NS")
+        canvas.grid(row=0, column=0, sticky="NSEW")
+
+        inner = tk.Frame(canvas, bg=BG0)
+        cw = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
+        inner.columnconfigure(0, weight=1)
+
+        # ── Local widget factories ─────────────────────────────────────────────
+        def grp(title):
+            f = tk.LabelFrame(inner, text=title, bg=BG0, fg=FG1,
+                              bd=1, relief="groove", font=("Segoe UI", 9))
+            f.pack(fill="x", padx=10, pady=(6, 0))
+            f.columnconfigure(1, weight=1)
+            return f
+
+        def sbtn(parent, text, cmd, fg=FG0, border=BG3):
+            return tk.Button(parent, text=text, bg=BG2, fg=fg, relief="flat", bd=0,
+                             cursor="hand2", font=("Segoe UI", 9), command=cmd,
+                             highlightthickness=1, highlightbackground=border,
+                             activebackground=BG3, activeforeground=FG0)
+
+        def ent(parent, default=""):
+            e = tk.Entry(parent, bg=BG2, fg=FG0, insertbackground=FG0,
+                         relief="solid", bd=1, font=("Segoe UI", 9))
+            if default:
+                e.insert(0, default)
+            return e
+
+        def cbo(parent, vals):
+            c = ttk.Combobox(parent, values=vals, state="readonly", font=("Segoe UI", 9))
+            c.current(0)
+            return c
+
+        def chk(parent, text):
+            var = tk.BooleanVar()
+            cb = tk.Checkbutton(parent, text=text, variable=var, bg=BG0, fg=FG1,
+                                selectcolor=BG2, activebackground=BG0,
+                                activeforeground=FG0, font=("Segoe UI", 10))
+            return cb, var
+
+        def spn(parent, lo, hi, default):
+            s = tk.Spinbox(parent, from_=lo, to=hi, bg=BG2, fg=FG0,
+                           insertbackground=FG0, buttonbackground=BG3,
+                           relief="solid", bd=1, font=("Segoe UI", 9), width=5)
+            s.delete(0, "end"); s.insert(0, str(default))
+            return s
+
+        def slbl(parent):
+            lbl = tk.Label(parent, text="", bg=BG0, fg=FG2,
+                           font=("Segoe UI", 9), anchor="w")
+            lbl.bind("<Configure>",
+                     lambda e, l=lbl: l.configure(wraplength=max(1, e.width - 4)))
+            return lbl
+
+        def lbl10(parent, text):
+            return tk.Label(parent, text=text, bg=BG0, fg=FG1, font=("Segoe UI", 10))
+
+        # ── Dependencies ──────────────────────────────────────────────────────
+        g = grp("Dependencies")
+        g.columnconfigure(1, weight=1)
+
+        tk.Label(g, text="yt-dlp:", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 9, "bold")).grid(
+                     row=0, column=0, padx=(8, 4), pady=(10, 3), sticky="W")
+        self.txt_ytdlp = ent(g, self.ytdlp_path)
+        self.txt_ytdlp.grid(row=0, column=1, padx=4, pady=(10, 3), sticky="EW", ipady=3)
+        sbtn(g, "Browse",      self._browse_ytdlp    ).grid(row=0, column=2, padx=4,    pady=(10, 3), ipady=3)
+        sbtn(g, "Auto-detect", self._autodetect_ytdlp).grid(row=0, column=3, padx=4,    pady=(10, 3), ipady=3)
+        self.btn_get_ytdlp = sbtn(g, "↓ Get yt-dlp", self._download_ytdlp)
+        self.btn_get_ytdlp.grid(row=0, column=4, padx=(4, 8), pady=(10, 3), ipady=3)
+
+        self.lbl_ytdlp_status = slbl(g)
+        self.lbl_ytdlp_status.grid(row=1, column=0, columnspan=5,
+                                    padx=8, pady=(0, 4), sticky="EW")
+
+        tk.Label(g, text="ffmpeg:", bg=BG0, fg=FG1,
+                 font=("Segoe UI", 9, "bold")).grid(
+                     row=2, column=0, padx=(8, 4), pady=(4, 3), sticky="W")
+        self.txt_ffmpeg = ent(g, self.ffmpeg_path)
+        self.txt_ffmpeg.grid(row=2, column=1, padx=4, pady=(4, 3), sticky="EW", ipady=3)
+        sbtn(g, "Browse",      self._browse_ffmpeg    ).grid(row=2, column=2, padx=4,    pady=(4, 3), ipady=3)
+        sbtn(g, "Auto-detect", self._autodetect_ffmpeg).grid(row=2, column=3, padx=4,    pady=(4, 3), ipady=3)
+        self.btn_get_ffmpeg = sbtn(g, "↓ Get ffmpeg", self._download_ffmpeg)
+        self.btn_get_ffmpeg.grid(row=2, column=4, padx=(4, 8), pady=(4, 3), ipady=3)
+
+        self.lbl_ffmpeg_status = slbl(g)
+        self.lbl_ffmpeg_status.grid(row=3, column=0, columnspan=5,
+                                     padx=8, pady=(0, 4), sticky="EW")
+
+        self.btn_quick_setup = tk.Button(
+            g, text="⚡  Quick Setup  —  download yt-dlp + ffmpeg",
+            bg=BG2, fg=BLUE, relief="flat", bd=0, cursor="hand2",
+            font=("Segoe UI", 9), command=self._quick_setup,
+            highlightthickness=1, highlightbackground=BLUE,
+            activebackground=BG3, activeforeground=FG0)
+        self.btn_quick_setup.grid(row=4, column=0, columnspan=5,
+                                   padx=8, pady=(2, 8), sticky="EW", ipady=3)
+
         self.txt_ytdlp.bind("<FocusOut>", self._on_ytdlp_entry_change)
         self.txt_ytdlp.bind("<Return>",   self._on_ytdlp_entry_change)
+        self.txt_ffmpeg.bind("<FocusOut>", self._on_ffmpeg_entry_change)
+        self.txt_ffmpeg.bind("<Return>",   self._on_ffmpeg_entry_change)
         self._refresh_ytdlp_status()
+        self._refresh_ffmpeg_status()
 
-        # Post-Processing  (y=112, h=129)
-        g = self._group(p, "Post-Processing", 10, 112, 630, 129)
-        self.v_thumb    = self._check(g, "Embed thumbnail as cover art",              0,  18)
-        self.v_meta     = self._check(g, "Embed metadata (title, artist...)",         0,  42)
-        self.v_chapters = self._check(g, "Embed chapter markers",                     0,  66)
-        self.v_sponsor  = self._check(g, "SponsorBlock: remove sponsored segments",   290, 18)
-        tk.Label(g, text="Remux to:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=290, y=44)
-        self.cbo_remux  = self._combo(g, 355, 40, 130,
-                                      ["None","mp4","mkv","mov","webm","avi","flv"])
-        tk.Label(g, text="Re-encode to:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=290, y=72)
-        self.cbo_recode = self._combo(g, 383, 68, 102,
-                                      ["None","mp4","mkv","mov","webm","mp3","m4a","wav"])
+        # ── Post-Processing ───────────────────────────────────────────────────
+        g = grp("Post-Processing")
+        g.columnconfigure(0, weight=1)
+        g.columnconfigure(1, weight=1)
 
-        # Subtitles  (y=251, h=102)
-        g = self._group(p, "Subtitles", 10, 251, 630, 102)
-        self.v_subs      = self._check(g, "Download subtitles",               0,  18)
-        self.v_auto_subs = self._check(g, "Include auto-generated subtitles", 0,  42)
-        tk.Label(g, text="Languages (comma-separated, e.g. en,ja):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=270, y=20)
-        self.txt_sub_langs = self._plain_entry(g, 270, 40, 200, "en")
+        cb, self.v_thumb    = chk(g, "Embed thumbnail as cover art")
+        cb.grid(row=0, column=0, padx=8, pady=(8, 2), sticky="W")
+        cb, self.v_meta     = chk(g, "Embed metadata (title, artist...)")
+        cb.grid(row=1, column=0, padx=8, pady=2, sticky="W")
+        cb, self.v_chapters = chk(g, "Embed chapter markers")
+        cb.grid(row=2, column=0, padx=8, pady=(2, 8), sticky="W")
 
-        # Network  (y=363, h=134)
-        # Proxy row is stacked (label above entry) to avoid horizontal overlap
-        g = self._group(p, "Network", 10, 363, 630, 134)
-        tk.Label(g, text="Rate limit (e.g. 5M, 500K, blank=off):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=20)
-        self.txt_rate    = self._plain_entry(g, 0, 40, 150)
-        tk.Label(g, text="Concurrent fragments:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=168, y=20)
-        self.spn_frags   = self._spinbox(g, 168, 40, 72, 1, 32, 1)
-        tk.Label(g, text="Cookies from browser:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=258, y=20)
-        self.cbo_cookies = self._combo(g, 258, 40, 180,
-            ["None","chrome","firefox","edge","brave","opera","safari","vivaldi","chromium"])
-        tk.Label(g, text="Retries:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=456, y=20)
-        self.spn_retries = self._spinbox(g, 456, 40, 60, 1, 50, 10)
-        tk.Label(g, text="Proxy (e.g. socks5://127.0.0.1:1080):", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 10)).place(x=0, y=76)
-        self.txt_proxy   = self._plain_entry(g, 0, 96, 606)
+        cb, self.v_sponsor  = chk(g, "SponsorBlock: remove sponsored segments")
+        cb.grid(row=0, column=1, padx=8, pady=(8, 2), sticky="W")
 
-        # Playlist  (y=507, h=62)  — trimmed 16 px to offset yt-dlp group growth
-        g = self._group(p, "Playlist Handling", 10, 507, 630, 62)
+        rr = tk.Frame(g, bg=BG0)
+        rr.grid(row=1, column=1, rowspan=2, padx=8, pady=(2, 8), sticky="EW")
+        rr.columnconfigure(1, weight=1)
+        lbl10(rr, "Remux to:").grid(   row=0, column=0, padx=(0, 6), pady=3, sticky="W")
+        self.cbo_remux = cbo(rr, ["None","mp4","mkv","mov","webm","avi","flv"])
+        self.cbo_remux.grid(row=0, column=1, sticky="EW", ipady=2)
+        lbl10(rr, "Re-encode to:").grid(row=1, column=0, padx=(0, 6), pady=3, sticky="W")
+        self.cbo_recode = cbo(rr, ["None","mp4","mkv","mov","webm","mp3","m4a","wav"])
+        self.cbo_recode.grid(row=1, column=1, sticky="EW", ipady=2)
+
+        # ── Subtitles ─────────────────────────────────────────────────────────
+        g = grp("Subtitles")
+        g.columnconfigure(0, weight=1)
+        g.columnconfigure(1, weight=1)
+
+        cb, self.v_subs      = chk(g, "Download subtitles")
+        cb.grid(row=0, column=0, padx=8, pady=(8, 2), sticky="W")
+        cb, self.v_auto_subs = chk(g, "Include auto-generated subtitles")
+        cb.grid(row=1, column=0, padx=8, pady=(2, 8), sticky="W")
+
+        sr = tk.Frame(g, bg=BG0)
+        sr.grid(row=0, column=1, rowspan=2, padx=8, pady=8, sticky="EW")
+        sr.columnconfigure(0, weight=1)
+        lbl10(sr, "Languages (comma-separated, e.g. en,ja):").grid(
+            row=0, column=0, sticky="W", pady=(0, 3))
+        self.txt_sub_langs = ent(sr, "en")
+        self.txt_sub_langs.grid(row=1, column=0, sticky="EW", ipady=3)
+
+        # ── Network ───────────────────────────────────────────────────────────
+        g = grp("Network")
+        g.columnconfigure(0, weight=1)
+        g.columnconfigure(0, weight=1)
+
+        top = tk.Frame(g, bg=BG0)
+        top.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="EW")
+        top.columnconfigure(0, weight=1)
+        top.columnconfigure(2, weight=1)
+
+        lbl10(top, "Rate limit (e.g. 5M, 500K):").grid(row=0, column=0, sticky="W")
+        self.txt_rate = ent(top)
+        self.txt_rate.grid(row=1, column=0, sticky="EW", ipady=3)
+
+        lbl10(top, "Concurrent frags:").grid(row=0, column=1, padx=(12, 4), sticky="W")
+        self.spn_frags = spn(top, 1, 32, 1)
+        self.spn_frags.grid(row=1, column=1, padx=(12, 4), ipady=3)
+
+        lbl10(top, "Cookies from browser:").grid(row=0, column=2, sticky="W")
+        self.cbo_cookies = cbo(top, ["None","chrome","firefox","edge","brave",
+                                      "opera","safari","vivaldi","chromium"])
+        self.cbo_cookies.grid(row=1, column=2, sticky="EW", ipady=2)
+
+        lbl10(top, "Retries:").grid(row=0, column=3, padx=(12, 0), sticky="W")
+        self.spn_retries = spn(top, 1, 50, 10)
+        self.spn_retries.grid(row=1, column=3, padx=(12, 0), ipady=3)
+
+        bot = tk.Frame(g, bg=BG0)
+        bot.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="EW")
+        bot.columnconfigure(0, weight=1)
+        lbl10(bot, "Proxy (e.g. socks5://127.0.0.1:1080):").grid(
+            row=0, column=0, sticky="W", pady=(0, 3))
+        self.txt_proxy = ent(bot)
+        self.txt_proxy.grid(row=1, column=0, sticky="EW", ipady=3)
+
+        # ── Playlist ──────────────────────────────────────────────────────────
+        g = grp("Playlist Handling")
+        g.columnconfigure(0, weight=1)
+
         self.v_playlist = tk.StringVar(value="auto")
-        for text, val, x in [
-            ("Auto (let yt-dlp decide)", "auto",   0),
-            ("Single video only",        "single", 200),
-            ("Always download full playlist", "full", 370),
-        ]:
-            tk.Radiobutton(g, text=text, variable=self.v_playlist, value=val,
+        pl = tk.Frame(g, bg=BG0)
+        pl.grid(row=0, column=0, padx=8, pady=8, sticky="W")
+        for text, val in [("Auto (let yt-dlp decide)", "auto"),
+                           ("Single video only",        "single"),
+                           ("Always full playlist",     "full")]:
+            tk.Radiobutton(pl, text=text, variable=self.v_playlist, value=val,
                            bg=BG0, fg=FG1, selectcolor=BG2,
                            activebackground=BG0, activeforeground=FG0,
-                           font=("Segoe UI", 10)).place(x=x, y=20)
+                           font=("Segoe UI", 10)).pack(side="left", padx=(0, 16))
 
-        # Output template  (y=579, h=78)
-        g = self._group(p, "Output Filename Template", 10, 579, 630, 78)
-        tk.Label(g, text="Template (yt-dlp format, %(title)s.%(ext)s = default):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=16)
-        self.txt_tmpl = self._plain_entry(g, 0, 36, 606, "%(title)s.%(ext)s")
+        # ── Output template ───────────────────────────────────────────────────
+        g = grp("Output Filename Template")
+        g.columnconfigure(0, weight=1)
 
-        # Extra args  (y=667, h=70)
-        g = self._group(p, "Extra yt-dlp Arguments", 10, 667, 630, 70)
-        tk.Label(g, text="Any additional flags appended verbatim:",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=16)
-        self.txt_extra = self._plain_entry(g, 0, 36, 606)
+        lbl10(g, "Template (%(title)s.%(ext)s = default):").grid(
+            row=0, column=0, padx=8, pady=(8, 3), sticky="W")
+        self.txt_tmpl = ent(g, "%(title)s.%(ext)s")
+        self.txt_tmpl.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="EW", ipady=3)
+
+        # ── Extra args ────────────────────────────────────────────────────────
+        g = grp("Extra yt-dlp Arguments")
+        g.columnconfigure(0, weight=1)
+
+        lbl10(g, "Any additional flags appended verbatim:").grid(
+            row=0, column=0, padx=8, pady=(8, 3), sticky="W")
+        self.txt_extra = ent(g)
+        self.txt_extra.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="EW", ipady=3)
+
+        # ── App Update ────────────────────────────────────────────────────────
+        g = grp("App Update")
+        g.columnconfigure(0, weight=1)
+
+        top_row = tk.Frame(g, bg=BG0)
+        top_row.grid(row=0, column=0, padx=8, pady=(8, 3), sticky="EW")
+        top_row.columnconfigure(0, weight=1)
+
+        tk.Label(top_row, text=f"Current version: v{VERSION}",
+                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).grid(
+                     row=0, column=0, sticky="W")
+        self.btn_check_update = sbtn(top_row, "Check for Updates",
+                                      self._check_app_update)
+        self.btn_check_update.grid(row=0, column=1, padx=(8, 0), ipady=3)
+
+        self.lbl_update_status = slbl(g)
+        self.lbl_update_status.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="EW")
+
+        tk.Frame(inner, bg=BG0, height=8).pack()
 
     # ── yt-dlp path helpers ────────────────────────────────────────────────────
     def _refresh_ytdlp_status(self):
@@ -595,6 +815,309 @@ class App(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
+    # ── ffmpeg path helpers ────────────────────────────────────────────────────
+    def _refresh_ffmpeg_status(self):
+        path = self.ffmpeg_path
+        if path and os.path.isfile(path):
+            self.lbl_ffmpeg_status.config(text="Checking version...", fg=FG1)
+            if hasattr(self, "btn_get_ffmpeg"):
+                self.btn_get_ffmpeg.config(text="↑ Update ffmpeg")
+            self._check_ffmpeg_version()
+        elif path:
+            self.lbl_ffmpeg_status.config(text="✗ Not found — verify the path above", fg=LOG_RED)
+            if hasattr(self, "btn_get_ffmpeg"):
+                self.btn_get_ffmpeg.config(text="↓ Get ffmpeg")
+        else:
+            self.lbl_ffmpeg_status.config(
+                text="Not set — use Browse or ↓ Get ffmpeg (required for merging formats)",
+                fg=FG2)
+            if hasattr(self, "btn_get_ffmpeg"):
+                self.btn_get_ffmpeg.config(text="↓ Get ffmpeg")
+
+    def _check_ffmpeg_version(self):
+        path = self.ffmpeg_path
+
+        def _status(text, color):
+            self.after(0, lambda t=text, c=color: self.lbl_ffmpeg_status.config(text=t, fg=c))
+
+        def run():
+            try:
+                flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                r = subprocess.run(
+                    [path, "-version"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=flags,
+                )
+                if r.returncode != 0:
+                    _status("⚠ ffmpeg failed to start — binary may be corrupted. Click ↑ Update ffmpeg", LOG_RED)
+                    return
+                first_line = r.stdout.splitlines()[0] if r.stdout else ""
+                ver = first_line.split("version")[-1].strip().split()[0] if "version" in first_line else "?"
+                _status(f"✓ ffmpeg {ver}", LOG_OK)
+            except Exception as exc:
+                _status(f"⚠ Could not run ffmpeg: {exc}", LOG_RED)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_ffmpeg_path(self, path: str):
+        self.ffmpeg_path = path
+        self.txt_ffmpeg.delete(0, "end")
+        self.txt_ffmpeg.insert(0, path)
+        cfg = _load_config()
+        cfg["ffmpeg_path"] = path
+        _save_config(cfg)
+        self._refresh_ffmpeg_status()
+
+    def _on_ffmpeg_entry_change(self, _=None):
+        self._set_ffmpeg_path(self.txt_ffmpeg.get().strip())
+
+    def _browse_ffmpeg(self):
+        path = filedialog.askopenfilename(
+            title="Locate ffmpeg executable",
+            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+            initialdir=str(Path(self.ffmpeg_path).parent) if self.ffmpeg_path else str(Path.home()),
+        )
+        if path:
+            self._set_ffmpeg_path(path)
+
+    def _autodetect_ffmpeg(self):
+        found = find_ffmpeg()
+        if found:
+            self._set_ffmpeg_path(found)
+        else:
+            self.lbl_ffmpeg_status.config(
+                text="Auto-detect failed — use Browse or ↓ Get ffmpeg to download it", fg=LOG_RED)
+
+    def _download_ffmpeg(self):
+        dest_dir = _BASE / "ffmpeg"
+        action = "Updating" if self.ffmpeg_path and os.path.isfile(self.ffmpeg_path) else "Downloading"
+        self.btn_get_ffmpeg.config(state="disabled", text=f"{action}...")
+
+        def _status(text, color):
+            self.after(0, lambda t=text, c=color: self.lbl_ffmpeg_status.config(text=t, fg=c))
+
+        def reporthook(count, block_size, total_size):
+            mb_done = count * block_size / 1_048_576
+            if total_size > 0:
+                pct = min(100, count * block_size * 100 // total_size)
+                total_mb = total_size / 1_048_576
+                msg = f"Downloading ffmpeg... {mb_done:.1f} / {total_mb:.1f} MB ({pct}%)"
+            else:
+                msg = f"Downloading ffmpeg... {mb_done:.1f} MB"
+            self.after(0, lambda m=msg: self.lbl_ffmpeg_status.config(text=m, fg=BLUE))
+
+        def run():
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp_path = tmp.name
+                urllib.request.urlretrieve(FFMPEG_RELEASE_URL, tmp_path, reporthook)
+                _status("Extracting ffmpeg...", BLUE)
+                with zipfile.ZipFile(tmp_path, "r") as zf:
+                    for member in zf.namelist():
+                        fname = member.split("/")[-1]
+                        if fname in ("ffmpeg.exe", "ffprobe.exe"):
+                            data = zf.read(member)
+                            out = dest_dir / fname
+                            out.write_bytes(data)
+                os.unlink(tmp_path)
+                ffmpeg_exe = str(dest_dir / "ffmpeg.exe")
+                self.after(0, lambda: self._set_ffmpeg_path(ffmpeg_exe))
+            except Exception as exc:
+                _status(f"Download failed: {exc}", LOG_RED)
+            finally:
+                self.after(0, lambda: self.btn_get_ffmpeg.config(
+                    state="normal", text="↓ Get ffmpeg"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ── Quick Setup ────────────────────────────────────────────────────────────
+    def _quick_setup(self):
+        self.btn_quick_setup.config(state="disabled", text="Setting up...")
+        self.btn_get_ytdlp.config(state="disabled")
+        self.btn_get_ffmpeg.config(state="disabled")
+
+        import threading as _t
+        lock = _t.Lock()
+        done = [0]
+
+        def on_both_done():
+            with lock:
+                done[0] += 1
+                if done[0] < 2:
+                    return
+            def re_enable():
+                self.btn_quick_setup.config(
+                    state="normal",
+                    text="⚡  Quick Setup  —  download yt-dlp + ffmpeg")
+                self.btn_get_ytdlp.config(state="normal")
+                self.btn_get_ffmpeg.config(state="normal")
+            self.after(0, re_enable)
+
+        def dl_ytdlp():
+            dest_dir = _BASE / "yt-dlp"
+            dest_file = dest_dir / "yt-dlp.exe"
+
+            def rh(count, block_size, total_size):
+                mb = count * block_size / 1_048_576
+                if total_size > 0:
+                    pct = min(100, count * block_size * 100 // total_size)
+                    msg = f"Downloading yt-dlp... {mb:.1f}/{total_size/1_048_576:.1f} MB ({pct}%)"
+                else:
+                    msg = f"Downloading yt-dlp... {mb:.1f} MB"
+                self.after(0, lambda m=msg: self.lbl_ytdlp_status.config(text=m, fg=BLUE))
+
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                urllib.request.urlretrieve(YTDLP_RELEASE_URL, str(dest_file), rh)
+                self.after(0, lambda: self._set_ytdlp_path(str(dest_file)))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): self.lbl_ytdlp_status.config(
+                    text=f"yt-dlp download failed: {e}", fg=LOG_RED))
+            finally:
+                on_both_done()
+
+        def dl_ffmpeg():
+            dest_dir = _BASE / "ffmpeg"
+
+            def _st(text, color):
+                self.after(0, lambda t=text, c=color: self.lbl_ffmpeg_status.config(text=t, fg=c))
+
+            def rh(count, block_size, total_size):
+                mb = count * block_size / 1_048_576
+                if total_size > 0:
+                    pct = min(100, count * block_size * 100 // total_size)
+                    msg = f"Downloading ffmpeg... {mb:.1f}/{total_size/1_048_576:.1f} MB ({pct}%)"
+                else:
+                    msg = f"Downloading ffmpeg... {mb:.1f} MB"
+                self.after(0, lambda m=msg: self.lbl_ffmpeg_status.config(text=m, fg=BLUE))
+
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                    tmp_path = tmp.name
+                urllib.request.urlretrieve(FFMPEG_RELEASE_URL, tmp_path, rh)
+                _st("Extracting ffmpeg...", BLUE)
+                with zipfile.ZipFile(tmp_path, "r") as zf:
+                    for member in zf.namelist():
+                        fname = member.split("/")[-1]
+                        if fname in ("ffmpeg.exe", "ffprobe.exe"):
+                            (dest_dir / fname).write_bytes(zf.read(member))
+                os.unlink(tmp_path)
+                ffmpeg_exe = str(dest_dir / "ffmpeg.exe")
+                self.after(0, lambda: self._set_ffmpeg_path(ffmpeg_exe))
+            except Exception as exc:
+                _st(f"ffmpeg download failed: {exc}", LOG_RED)
+            finally:
+                on_both_done()
+
+        threading.Thread(target=dl_ytdlp, daemon=True).start()
+        threading.Thread(target=dl_ffmpeg, daemon=True).start()
+
+    # ── App self-update ────────────────────────────────────────────────────────
+    def _check_app_update(self):
+        self.btn_check_update.config(state="disabled", text="Checking...")
+        self.lbl_update_status.config(text="Checking for updates...", fg=FG1)
+
+        def _status(text, color):
+            self.after(0, lambda t=text, c=color: self.lbl_update_status.config(text=t, fg=c))
+
+        def run():
+            try:
+                req = urllib.request.Request(
+                    APP_RELEASES_API,
+                    headers={"User-Agent": f"dlp-ui/{VERSION}"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read())
+
+                latest_tag = data.get("tag_name", "").lstrip("v")
+                assets = data.get("assets", [])
+                exe_asset = next((a for a in assets if a["name"] == "dlp-ui.exe"), None)
+
+                if not exe_asset:
+                    _status("No dlp-ui.exe asset found in latest release.", LOG_WARN)
+                    return
+
+                if _parse_ver(latest_tag) <= _parse_ver(VERSION):
+                    _status(f"✓ v{VERSION} — already up to date", LOG_OK)
+                    return
+
+                dl_url = exe_asset["browser_download_url"]
+                _status(
+                    f"Update available: v{VERSION} → v{latest_tag}  —  click the button to install",
+                    LOG_WARN,
+                )
+                self.after(0, lambda u=dl_url, v=latest_tag: self._offer_update(u, v))
+            except Exception as exc:
+                _status(f"Could not check for updates: {exc}", LOG_RED)
+            finally:
+                self.after(0, lambda: self.btn_check_update.config(
+                    state="normal", text="Check for Updates",
+                    command=self._check_app_update))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _offer_update(self, download_url: str, new_ver: str):
+        self.btn_check_update.config(
+            state="normal",
+            text=f"↓  Install v{new_ver}",
+            command=lambda: self._download_and_apply_update(download_url, new_ver),
+        )
+
+    def _download_and_apply_update(self, download_url: str, new_ver: str):
+        if not getattr(sys, "frozen", False):
+            self.lbl_update_status.config(
+                text="Self-update only works in the compiled EXE, not from source.",
+                fg=LOG_WARN)
+            return
+
+        self.btn_check_update.config(state="disabled", text="Downloading...")
+
+        def _status(text, color):
+            self.after(0, lambda t=text, c=color: self.lbl_update_status.config(text=t, fg=c))
+
+        def reporthook(count, block_size, total_size):
+            mb = count * block_size / 1_048_576
+            if total_size > 0:
+                pct  = min(100, count * block_size * 100 // total_size)
+                tmb  = total_size / 1_048_576
+                msg  = f"Downloading v{new_ver}... {mb:.1f}/{tmb:.1f} MB ({pct}%)"
+            else:
+                msg = f"Downloading v{new_ver}... {mb:.1f} MB"
+            self.after(0, lambda m=msg: self.lbl_update_status.config(text=m, fg=BLUE))
+
+        def run():
+            current  = Path(sys.executable)
+            new_file = current.with_name("dlp-ui-update.exe")
+            bat_file = current.with_name("_dlp-ui-updater.bat")
+            try:
+                urllib.request.urlretrieve(download_url, str(new_file), reporthook)
+
+                bat_file.write_text(
+                    "@echo off\r\n"
+                    "ping -n 3 127.0.0.1 > nul\r\n"
+                    f'move /y "{new_file}" "{current}"\r\n'
+                    f'start "" "{current}"\r\n'
+                    "del \"%~f0\"\r\n",
+                    encoding="utf-8",
+                )
+
+                _status(f"v{new_ver} downloaded — restarting app...", LOG_OK)
+                self.after(800, lambda: self._apply_update(bat_file))
+            except Exception as exc:
+                _status(f"Update failed: {exc}", LOG_RED)
+                self.after(0, lambda: self.btn_check_update.config(
+                    state="normal", text="Check for Updates",
+                    command=self._check_app_update))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _apply_update(self, bat_file: Path):
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+        subprocess.Popen(["cmd", "/c", str(bat_file)], creationflags=flags)
+        self.on_close()
+
     # ── Format change ──────────────────────────────────────────────────────────
     def _fmt_changed(self, _=None):
         t = FORMAT_TYPES[self.cbo_fmt.get()]
@@ -662,7 +1185,7 @@ class App(tk.Tk):
             messagebox.showerror(
                 "yt-dlp not found",
                 "yt-dlp.exe could not be located.\n\n"
-                "Go to Settings → yt-dlp Executable and use Browse or Auto-detect.",
+                "Go to Settings → Dependencies and use Browse or Auto-detect.",
             )
             return
 
@@ -717,6 +1240,10 @@ class App(tk.Tk):
         self._log(f"  Dest    : {dest}", "gray")
         self._log("")
 
+        ffmpeg_dir = str(Path(self.ffmpeg_path).parent) if self.ffmpeg_path and os.path.isfile(self.ffmpeg_path) else ""
+        if ffmpeg_dir and not shutil.which("ffmpeg"):
+            args = ["--ffmpeg-location", ffmpeg_dir] + args
+
         cmd = [self.ytdlp_path] + args
 
         _STALE_HINTS = [
@@ -757,7 +1284,7 @@ class App(tk.Tk):
                 if stale_detected and self.proc.returncode != 0:
                     self._q.put(("", "gray"))
                     self._q.put(("  Hint: yt-dlp could not decrypt YouTube's player.", "info"))
-                    self._q.put(("  Go to Settings → yt-dlp Executable → ↑ Update yt-dlp", "info"))
+                    self._q.put(("  Go to Settings → Dependencies → ↑ Update yt-dlp", "info"))
             except Exception as exc:
                 self._q.put((f"Error launching yt-dlp: {exc}", "err"))
             finally:
