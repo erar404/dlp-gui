@@ -50,6 +50,13 @@ def _save_config(data: dict) -> None:
         pass
 
 
+def _parse_ver(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in v.strip().lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+
 def find_ytdlp() -> str:
     """Return the first valid yt-dlp executable path, or empty string."""
     found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
@@ -80,6 +87,7 @@ LOG_RED   = "#ff6464"
 LOG_GRAY  = "#d2d2d2"
 LOG_OK    = "#50dc50"
 LOG_FAIL  = "#ff5050"
+LOG_WARN  = "#f59e0b"
 
 # ── Format definitions ─────────────────────────────────────────────────────────
 VIDEO_QUALITIES = {
@@ -213,7 +221,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("YT-DLP Downloader")
-        self.geometry("660x700")
+        self.geometry("660x770")
         self.resizable(False, False)
         self.configure(bg=BG0)
         self.proc = None
@@ -255,7 +263,7 @@ class App(tk.Tk):
     # ── Widget helpers ─────────────────────────────────────────────────────────
     def _lbl(self, p, text, x, y):
         tk.Label(p, text=text, bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=x, y=y)
+                 font=("Segoe UI", 10)).place(x=x, y=y)
 
     def _entry(self, p, x, y, w, ph=None):
         e = PlaceholderEntry(p, placeholder=ph or "",
@@ -290,11 +298,11 @@ class App(tk.Tk):
         var = tk.BooleanVar()
         tk.Checkbutton(p, text=text, variable=var, bg=BG0, fg=FG1,
                        selectcolor=BG2, activebackground=BG0, activeforeground=FG0,
-                       font=("Segoe UI", 9)).place(x=x, y=y)
+                       font=("Segoe UI", 10)).place(x=x, y=y)
         return var
 
     def _group(self, p, text, x, y, w, h):
-        f = tk.LabelFrame(p, text=text, bg=BG0, fg=FG2,
+        f = tk.LabelFrame(p, text=text, bg=BG0, fg=FG1,
                           bd=1, relief="groove", font=("Segoe UI", 9))
         f.place(x=x, y=y, width=w, height=h)
         return f
@@ -334,11 +342,11 @@ class App(tk.Tk):
         self.log = tk.Text(p, bg="#0a0a0a", fg=LOG_GRAY, state="disabled",
                            relief="flat", bd=0, wrap="word",
                            font=self._mono())
-        self.log.place(x=16, y=290, width=618, height=300)
+        self.log.place(x=16, y=290, width=618, height=360)
 
         sb = tk.Scrollbar(p, command=self.log.yview, bg=BG2, troughcolor=BG1,
                           activebackground=BG3)
-        sb.place(x=634, y=290, width=12, height=300)
+        sb.place(x=634, y=290, width=12, height=360)
         self.log.config(yscrollcommand=sb.set)
 
         for tag, color in [("err",  LOG_RED),   ("dl",   LOG_GREEN),
@@ -347,7 +355,7 @@ class App(tk.Tk):
                             ("fail", LOG_FAIL)]:
             self.log.tag_configure(tag, foreground=color)
 
-        self._btn(p, "Clear log", 16, 597, 618, 24, BG1, FG2, BG2,
+        self._btn(p, "Clear log", 16, 658, 618, 24, BG1, FG2, BG2,
                   self._clear, font=("Segoe UI", 8))
 
     def _mono(self):
@@ -361,66 +369,71 @@ class App(tk.Tk):
     def _build_settings(self):
         p = self.tab_cfg
 
-        # yt-dlp Executable
-        g = self._group(p, "yt-dlp Executable", 10, 10, 630, 62)
-        self.txt_ytdlp = self._plain_entry(g, 0, 4, 290, self.ytdlp_path)
-        self._btn(g, "Browse...", 296, 4, 74, 26, BG2, FG0, BG3,
+        # yt-dlp Executable  (y=10, h=92)
+        # First row at y=18 clears the LabelFrame border (~14 px from top).
+        # Status label gets explicit width + wraplength so long messages wrap
+        # instead of overflowing the frame edge and getting clipped.
+        g = self._group(p, "yt-dlp Executable", 10, 10, 630, 92)
+        self.txt_ytdlp = self._plain_entry(g, 0, 18, 290, self.ytdlp_path)
+        self._btn(g, "Browse...", 296, 18, 74, 26, BG2, FG0, BG3,
                   self._browse_ytdlp)
-        self._btn(g, "Auto-detect", 376, 4, 84, 26, BG2, FG0, BG3,
+        self._btn(g, "Auto-detect", 376, 18, 84, 26, BG2, FG0, BG3,
                   self._autodetect_ytdlp)
-        self.btn_get_ytdlp = self._btn(g, "↓ Get yt-dlp", 466, 4, 140, 26,
+        self.btn_get_ytdlp = self._btn(g, "↓ Get yt-dlp", 466, 18, 140, 26,
                                         BG2, FG0, BG3, self._download_ytdlp)
         self.lbl_ytdlp_status = tk.Label(g, text="", bg=BG0,
-                                          font=("Segoe UI", 8))
-        self.lbl_ytdlp_status.place(x=0, y=34)
+                                          font=("Segoe UI", 9),
+                                          wraplength=610, justify="left")
+        self.lbl_ytdlp_status.place(x=2, y=52, width=610)
         self.txt_ytdlp.bind("<FocusOut>", self._on_ytdlp_entry_change)
         self.txt_ytdlp.bind("<Return>",   self._on_ytdlp_entry_change)
         self._refresh_ytdlp_status()
 
-        # Post-Processing
-        g = self._group(p, "Post-Processing", 10, 82, 630, 115)
-        self.v_thumb    = self._check(g, "Embed thumbnail as cover art",              0,   4)
-        self.v_meta     = self._check(g, "Embed metadata (title, artist...)",         0,  28)
-        self.v_chapters = self._check(g, "Embed chapter markers",                     0,  52)
-        self.v_sponsor  = self._check(g, "SponsorBlock: remove sponsored segments",   290,  4)
+        # Post-Processing  (y=112, h=129)
+        g = self._group(p, "Post-Processing", 10, 112, 630, 129)
+        self.v_thumb    = self._check(g, "Embed thumbnail as cover art",              0,  18)
+        self.v_meta     = self._check(g, "Embed metadata (title, artist...)",         0,  42)
+        self.v_chapters = self._check(g, "Embed chapter markers",                     0,  66)
+        self.v_sponsor  = self._check(g, "SponsorBlock: remove sponsored segments",   290, 18)
         tk.Label(g, text="Remux to:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=290, y=30)
-        self.cbo_remux  = self._combo(g, 355, 26, 130,
+                 font=("Segoe UI", 10)).place(x=290, y=44)
+        self.cbo_remux  = self._combo(g, 355, 40, 130,
                                       ["None","mp4","mkv","mov","webm","avi","flv"])
         tk.Label(g, text="Re-encode to:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=290, y=58)
-        self.cbo_recode = self._combo(g, 383, 54, 102,
+                 font=("Segoe UI", 10)).place(x=290, y=72)
+        self.cbo_recode = self._combo(g, 383, 68, 102,
                                       ["None","mp4","mkv","mov","webm","mp3","m4a","wav"])
 
-        # Subtitles
-        g = self._group(p, "Subtitles", 10, 207, 630, 88)
-        self.v_subs      = self._check(g, "Download subtitles",               0,  4)
-        self.v_auto_subs = self._check(g, "Include auto-generated subtitles", 0, 28)
+        # Subtitles  (y=251, h=102)
+        g = self._group(p, "Subtitles", 10, 251, 630, 102)
+        self.v_subs      = self._check(g, "Download subtitles",               0,  18)
+        self.v_auto_subs = self._check(g, "Include auto-generated subtitles", 0,  42)
         tk.Label(g, text="Languages (comma-separated, e.g. en,ja):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 9)).place(x=270, y=6)
-        self.txt_sub_langs = self._plain_entry(g, 270, 26, 200, "en")
+                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=270, y=20)
+        self.txt_sub_langs = self._plain_entry(g, 270, 40, 200, "en")
 
-        # Network
-        g = self._group(p, "Network", 10, 305, 630, 112)
+        # Network  (y=363, h=134)
+        # Proxy row is stacked (label above entry) to avoid horizontal overlap
+        g = self._group(p, "Network", 10, 363, 630, 134)
         tk.Label(g, text="Rate limit (e.g. 5M, 500K, blank=off):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 9)).place(x=0, y=6)
-        self.txt_rate    = self._plain_entry(g, 0, 26, 150)
+                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=20)
+        self.txt_rate    = self._plain_entry(g, 0, 40, 150)
         tk.Label(g, text="Concurrent fragments:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=168, y=6)
-        self.spn_frags   = self._spinbox(g, 168, 26, 72, 1, 32, 1)
+                 font=("Segoe UI", 10)).place(x=168, y=20)
+        self.spn_frags   = self._spinbox(g, 168, 40, 72, 1, 32, 1)
         tk.Label(g, text="Cookies from browser:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=258, y=6)
-        self.cbo_cookies = self._combo(g, 258, 26, 180,
+                 font=("Segoe UI", 10)).place(x=258, y=20)
+        self.cbo_cookies = self._combo(g, 258, 40, 180,
             ["None","chrome","firefox","edge","brave","opera","safari","vivaldi","chromium"])
         tk.Label(g, text="Retries:", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=456, y=6)
-        self.spn_retries = self._spinbox(g, 456, 26, 60, 1, 50, 10)
+                 font=("Segoe UI", 10)).place(x=456, y=20)
+        self.spn_retries = self._spinbox(g, 456, 40, 60, 1, 50, 10)
         tk.Label(g, text="Proxy (e.g. socks5://127.0.0.1:1080):", bg=BG0, fg=FG1,
-                 font=("Segoe UI", 9)).place(x=0, y=62)
-        self.txt_proxy   = self._plain_entry(g, 228, 58, 290)
+                 font=("Segoe UI", 10)).place(x=0, y=76)
+        self.txt_proxy   = self._plain_entry(g, 0, 96, 606)
 
-        # Playlist
-        g = self._group(p, "Playlist Handling", 10, 427, 630, 64)
+        # Playlist  (y=507, h=62)  — trimmed 16 px to offset yt-dlp group growth
+        g = self._group(p, "Playlist Handling", 10, 507, 630, 62)
         self.v_playlist = tk.StringVar(value="auto")
         for text, val, x in [
             ("Auto (let yt-dlp decide)", "auto",   0),
@@ -430,35 +443,98 @@ class App(tk.Tk):
             tk.Radiobutton(g, text=text, variable=self.v_playlist, value=val,
                            bg=BG0, fg=FG1, selectcolor=BG2,
                            activebackground=BG0, activeforeground=FG0,
-                           font=("Segoe UI", 9)).place(x=x, y=6)
+                           font=("Segoe UI", 10)).place(x=x, y=20)
 
-        # Output template
-        g = self._group(p, "Output Filename Template", 10, 501, 630, 64)
+        # Output template  (y=579, h=78)
+        g = self._group(p, "Output Filename Template", 10, 579, 630, 78)
         tk.Label(g, text="Template (yt-dlp format, %(title)s.%(ext)s = default):",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 9)).place(x=0, y=2)
-        self.txt_tmpl = self._plain_entry(g, 0, 22, 606, "%(title)s.%(ext)s")
+                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=16)
+        self.txt_tmpl = self._plain_entry(g, 0, 36, 606, "%(title)s.%(ext)s")
 
-        # Extra args
-        g = self._group(p, "Extra yt-dlp Arguments", 10, 575, 630, 56)
+        # Extra args  (y=667, h=70)
+        g = self._group(p, "Extra yt-dlp Arguments", 10, 667, 630, 70)
         tk.Label(g, text="Any additional flags appended verbatim:",
-                 bg=BG0, fg=FG1, font=("Segoe UI", 9)).place(x=0, y=2)
-        self.txt_extra = self._plain_entry(g, 0, 20, 606)
+                 bg=BG0, fg=FG1, font=("Segoe UI", 10)).place(x=0, y=16)
+        self.txt_extra = self._plain_entry(g, 0, 36, 606)
 
     # ── yt-dlp path helpers ────────────────────────────────────────────────────
     def _refresh_ytdlp_status(self):
         path = self.ytdlp_path
         if path and os.path.isfile(path):
-            self.lbl_ytdlp_status.config(text=f"Found: {path}", fg=LOG_OK)
+            self.lbl_ytdlp_status.config(text="Checking version...", fg=FG1)
             if hasattr(self, "btn_get_ytdlp"):
                 self.btn_get_ytdlp.config(text="↑ Update yt-dlp")
+            self._check_ytdlp_version()
         elif path:
-            self.lbl_ytdlp_status.config(text=f"Not found: {path}", fg=LOG_RED)
+            self.lbl_ytdlp_status.config(text="✗ Not found — verify the path above", fg=LOG_RED)
             if hasattr(self, "btn_get_ytdlp"):
                 self.btn_get_ytdlp.config(text="↓ Get yt-dlp")
         else:
             self.lbl_ytdlp_status.config(text="No path set — use Browse or ↓ Get yt-dlp", fg=FG2)
             if hasattr(self, "btn_get_ytdlp"):
                 self.btn_get_ytdlp.config(text="↓ Get yt-dlp")
+
+    def _check_ytdlp_version(self):
+        path = self.ytdlp_path
+
+        def _status(text, color):
+            self.after(0, lambda t=text, c=color: self.lbl_ytdlp_status.config(text=t, fg=c))
+
+        def run():
+            # ── 1. Incomplete file ────────────────────────────────────────────
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                _status("⚠ Cannot read file — may be incomplete. Click ↑ Update yt-dlp", LOG_RED)
+                return
+            if size < 1_000_000:
+                kb = size // 1024
+                _status(
+                    f"⚠ File too small ({kb} KB) — incomplete download. Click ↑ Update yt-dlp",
+                    LOG_RED,
+                )
+                return
+
+            # ── 2. Runs cleanly ───────────────────────────────────────────────
+            try:
+                flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                r = subprocess.run(
+                    [path, "--version"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=flags,
+                )
+                local_ver = r.stdout.strip()
+                if r.returncode != 0 or not local_ver:
+                    _status(
+                        "⚠ yt-dlp failed to start — binary may be corrupted. Click ↑ Update yt-dlp",
+                        LOG_RED,
+                    )
+                    return
+            except Exception as exc:
+                _status(f"⚠ Could not run yt-dlp: {exc}", LOG_RED)
+                return
+
+            # ── 3. Compare with GitHub latest release ─────────────────────────
+            try:
+                req = urllib.request.Request(
+                    "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+                    headers={"User-Agent": "dlp-ui/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    latest_ver = json.loads(resp.read()).get("tag_name", "").lstrip("v")
+            except Exception:
+                _status(f"✓ v{local_ver} — could not check for updates (offline?)", LOG_OK)
+                return
+
+            if _parse_ver(local_ver) >= _parse_ver(latest_ver):
+                _status(f"✓ v{local_ver} — up to date", LOG_OK)
+            else:
+                _status(
+                    f"⚠ Outdated: v{local_ver} → v{latest_ver} available — click ↑ Update yt-dlp",
+                    LOG_WARN,
+                )
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _set_ytdlp_path(self, path: str):
         self.ytdlp_path = path
@@ -643,7 +719,14 @@ class App(tk.Tk):
 
         cmd = [self.ytdlp_path] + args
 
+        _STALE_HINTS = [
+            "nsig extraction failed",
+            "Precondition check failed",
+            "Only images are available",
+        ]
+
         def run():
+            stale_detected = False
             try:
                 flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 self.proc = subprocess.Popen(
@@ -659,6 +742,8 @@ class App(tk.Tk):
                     line = line.rstrip()
                     if not line:
                         continue
+                    if any(h in line for h in _STALE_HINTS):
+                        stale_detected = True
                     if "ERROR" in line or line.startswith("ERR:"):
                         tag = "err"
                     elif "[download]" in line:
@@ -669,6 +754,10 @@ class App(tk.Tk):
                         tag = "gray"
                     self._q.put((line, tag))
                 self.proc.wait()
+                if stale_detected and self.proc.returncode != 0:
+                    self._q.put(("", "gray"))
+                    self._q.put(("  Hint: yt-dlp could not decrypt YouTube's player.", "info"))
+                    self._q.put(("  Go to Settings → yt-dlp Executable → ↑ Update yt-dlp", "info"))
             except Exception as exc:
                 self._q.put((f"Error launching yt-dlp: {exc}", "err"))
             finally:

@@ -10,7 +10,7 @@ if errorlevel 1 (
     )
 )
 
-py -m PyInstaller --onefile --windowed --name "dlp-ui" dlp-ui.py
+py -m PyInstaller --onefile --windowed --name "dlp-ui" --icon "favicon.ico" dlp-ui.py
 
 echo.
 if exist "dist\dlp-ui.exe" (
