@@ -8,6 +8,7 @@ import shlex
 import sys
 import json
 import shutil
+import urllib.request
 from pathlib import Path
 
 # ── Config persistence ─────────────────────────────────────────────────────────
@@ -17,6 +18,10 @@ else:
     _BASE = Path(__file__).parent
 
 CONFIG_FILE = _BASE / "dlp-ui-config.json"
+
+YTDLP_RELEASE_URL = (
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+)
 
 COMMON_YTDLP_PATHS = [
     r"C:\ERAR\yt-dlp\dist\yt-dlp.exe",
@@ -358,11 +363,13 @@ class App(tk.Tk):
 
         # yt-dlp Executable
         g = self._group(p, "yt-dlp Executable", 10, 10, 630, 62)
-        self.txt_ytdlp = self._plain_entry(g, 0, 4, 418, self.ytdlp_path)
-        self._btn(g, "Browse...", 424, 4, 80, 26, BG2, FG0, BG3,
+        self.txt_ytdlp = self._plain_entry(g, 0, 4, 290, self.ytdlp_path)
+        self._btn(g, "Browse...", 296, 4, 74, 26, BG2, FG0, BG3,
                   self._browse_ytdlp)
-        self._btn(g, "Auto-detect", 510, 4, 96, 26, BG2, FG0, BG3,
+        self._btn(g, "Auto-detect", 376, 4, 84, 26, BG2, FG0, BG3,
                   self._autodetect_ytdlp)
+        self.btn_get_ytdlp = self._btn(g, "↓ Get yt-dlp", 466, 4, 140, 26,
+                                        BG2, FG0, BG3, self._download_ytdlp)
         self.lbl_ytdlp_status = tk.Label(g, text="", bg=BG0,
                                           font=("Segoe UI", 8))
         self.lbl_ytdlp_status.place(x=0, y=34)
@@ -442,10 +449,16 @@ class App(tk.Tk):
         path = self.ytdlp_path
         if path and os.path.isfile(path):
             self.lbl_ytdlp_status.config(text=f"Found: {path}", fg=LOG_OK)
+            if hasattr(self, "btn_get_ytdlp"):
+                self.btn_get_ytdlp.config(text="↑ Update yt-dlp")
         elif path:
             self.lbl_ytdlp_status.config(text=f"Not found: {path}", fg=LOG_RED)
+            if hasattr(self, "btn_get_ytdlp"):
+                self.btn_get_ytdlp.config(text="↓ Get yt-dlp")
         else:
-            self.lbl_ytdlp_status.config(text="No path set — use Browse or Auto-detect", fg=FG2)
+            self.lbl_ytdlp_status.config(text="No path set — use Browse or ↓ Get yt-dlp", fg=FG2)
+            if hasattr(self, "btn_get_ytdlp"):
+                self.btn_get_ytdlp.config(text="↓ Get yt-dlp")
 
     def _set_ytdlp_path(self, path: str):
         self.ytdlp_path = path
@@ -474,7 +487,37 @@ class App(tk.Tk):
             self._set_ytdlp_path(found)
         else:
             self.lbl_ytdlp_status.config(
-                text="Auto-detect failed — use Browse to locate yt-dlp manually", fg=LOG_RED)
+                text="Auto-detect failed — use Browse or ↓ Get yt-dlp to download it", fg=LOG_RED)
+
+    def _download_ytdlp(self):
+        dest_dir = _BASE / "yt-dlp"
+        dest_file = dest_dir / "yt-dlp.exe"
+        action = "Updating" if self.ytdlp_path and os.path.isfile(self.ytdlp_path) else "Downloading"
+        self.btn_get_ytdlp.config(state="disabled", text=f"{action}...")
+
+        def reporthook(count, block_size, total_size):
+            mb_done = count * block_size / 1_048_576
+            if total_size > 0:
+                pct = min(100, count * block_size * 100 // total_size)
+                total_mb = total_size / 1_048_576
+                msg = f"Downloading yt-dlp... {mb_done:.1f} / {total_mb:.1f} MB ({pct}%)"
+            else:
+                msg = f"Downloading yt-dlp... {mb_done:.1f} MB"
+            self.after(0, lambda m=msg: self.lbl_ytdlp_status.config(text=m, fg=BLUE))
+
+        def run():
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                urllib.request.urlretrieve(YTDLP_RELEASE_URL, str(dest_file), reporthook)
+                self.after(0, lambda: self._set_ytdlp_path(str(dest_file)))
+            except Exception as exc:
+                self.after(0, lambda e=str(exc): self.lbl_ytdlp_status.config(
+                    text=f"Download failed: {e}", fg=LOG_RED))
+            finally:
+                self.after(0, lambda: self.btn_get_ytdlp.config(
+                    state="normal", text="↓ Get yt-dlp"))
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── Format change ──────────────────────────────────────────────────────────
     def _fmt_changed(self, _=None):

@@ -26,6 +26,7 @@
 - [Building for Production](#-building-for-production)
 - [yt-dlp Path Detection](#-yt-dlp-path-detection)
 - [Config Persistence](#-config-persistence)
+- [Backend API](#-backend-api)
 - [Core Data Flow](#-core-data-flow)
 - [Format Selection Logic](#-format-selection-logic)
 - [Brand & Design Tokens](#-brand--design-tokens)
@@ -373,6 +374,20 @@ Any path set via the UI is immediately saved to `dlp-ui-config.json` so it persi
 | `ytdlp_path` | string | Absolute path to `yt-dlp.exe` chosen by the user or auto-detected |
 
 > 💡 To reset to auto-detection on next launch, delete `dlp-ui-config.json` or clear the `ytdlp_path` value.
+
+---
+
+## 🌍 Backend API
+
+The production backend is deployed on **Google Cloud Run** (asia-southeast1).
+
+| Property | Value |
+|---|---|
+| Base URL | `https://rgmc-bc-api-prod-935246372408.asia-southeast1.run.app/` |
+| Provider | Google Cloud Run |
+| Region | `asia-southeast1` (Singapore) |
+
+> 📌 Task-authenticated endpoints require a secret passed as an auth header/param. Keep the task secret out of source control — store it in an environment variable or a local config file that is `.gitignore`d.
 
 ---
 
