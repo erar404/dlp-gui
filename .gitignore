@@ -1,0 +1,21 @@
+# Build output
+dist/
+build/
+
+# Downloaded dependencies
+deps/
+ffmpeg/
+yt-dlp/
+
+# PyInstaller
+*.spec.bak
+__pycache__/
+*.pyc
+
+# Config saved at runtime
+dlp-ui-config.json
+
+# Packaged releases
+*.exe
+*.rar
+*.zip
