@@ -1,0 +1,18 @@
+"""Dark color palette shared across every widget in the app."""
+
+BG0 = "#121212"
+BG1 = "#1c1c1c"
+BG2 = "#282828"
+BG3 = "#373737"
+FG0 = "#ffffff"
+FG1 = "#aaaaaa"
+FG2 = "#6e6e6e"
+RED = "#dc2626"
+BLUE = "#64a0ff"
+
+LOG_GREEN = "#64dc64"
+LOG_RED = "#ff6464"
+LOG_GRAY = "#d2d2d2"
+LOG_OK = "#50dc50"
+LOG_FAIL = "#ff5050"
+LOG_WARN = "#f59e0b"

@@ -6,6 +6,10 @@ build/
 deps/
 ffmpeg/
 yt-dlp/
+python-embed/
+
+# Spleeter's pretrained-model cache (downloaded on first split, into the CWD)
+pretrained_models/
 
 # PyInstaller
 *.spec.bak

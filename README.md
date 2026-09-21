@@ -110,12 +110,33 @@ The Python version is the primary build target and adds **yt-dlp path auto-detec
 - Browse for destination folder
 - Extra raw yt-dlp flags appended verbatim
 
+### 🎚️ Audio Tools (Spleeter · Click Track · Tempo)
+
+When **MP3** is selected as the format, three extra options appear:
+
+- **Split audio tracks (Spleeter AI)** — uses [Deezer's Spleeter](https://github.com/deezer/spleeter) to separate the downloaded MP3 into isolated stems after the download finishes
+  - Stem presets: **2 stems** (vocals / instrumental), **4 stems** (vocals / drums / bass / other), **5 stems** (+ piano)
+  - Output stems are written to a `<filename>_tracks` subfolder next to the downloaded MP3 (e.g. `Song Title_tracks\vocals.wav`)
+- **Generate click track (librosa)** — analyzes the downloaded MP3 with [librosa](https://librosa.org/)'s beat tracker and renders a metronome click at every detected beat, encoded to `<filename>_click.mp3` next to the source file (via ffmpeg)
+- **Show suggested tempo (BPM)** — runs the same beat-tracking analysis and displays the estimated tempo (e.g. `128.4 BPM`) next to the checkbox, and logs it to the Output Log
+
+**No Python installation required on the target machine.** Settings → **Audio Tools (Spleeter · Click Track · Tempo)** → **⚡ Auto-Setup Audio Tools** downloads a private, portable Python 3.10 runtime (the official embeddable build from python.org) into `python-embed/` next to the app, bootstraps `pip` inside it, and installs Spleeter + librosa there — completely isolated from any Python already on the system. This runtime is never shared with or visible to other applications.
+
+- Spleeter needs Python 3.6–3.10 specifically (it depends on an old TensorFlow/numpy pin that has no prebuilt wheels for 3.11+, and building from source fails because `numpy.distutils` relies on the standard-library `distutils` module removed in Python 3.12) — the portable runtime sidesteps this entirely, and librosa/soundfile are installed into the same runtime so tempo/click-track features share it
+- The download is sizeable (~500 MB+, mostly TensorFlow) and only happens once, on demand
+- Advanced users who already have a compatible Python 3.6–3.10 install can instead point the app at it directly (Browse/Auto-detect + ↓ Install Spleeter) under "Advanced" in the same settings group
+
 ### 🔍 yt-dlp Executable Location
 
 - **Auto-detect** scans `PATH` and 6 common Windows install locations
 - **Browse** opens a file picker to navigate to `yt-dlp.exe` anywhere on disk
 - Chosen path persists to `dlp-ui-config.json` and reloads on next launch
 - Status indicator shows green "Found: …" or red "Not found: …" in real time
+
+### ☕ Tip Jar
+
+- A small popup appears after every successful download, with a lighthearted note (`TIP_NOTE` in `dlp-ui.py` — one string, edit it freely) and the developer's tip QR code (`qrcode.png`) underneath
+- Purely cosmetic — closing it does nothing to the app; there's nothing to unlock
 
 ---
 
@@ -182,32 +203,60 @@ The app is a fixed-size (660 × 700) dark window with two tabs.
 
 ## 📁 Project Structure
 
+The Python/tkinter app is a package (`dlp_gui/`) with a thin entry
+point (`dlp-ui.py`), organized by function so each concern lives in
+its own module:
+
 ```
 dlp-ui/
-├── dlp-ui.py              # Main app — Python/tkinter (primary build target)
-│   ├── find_ytdlp()       #   Auto-detects yt-dlp across PATH + common dirs
-│   ├── _load_config()     #   Reads dlp-ui-config.json
-│   ├── _save_config()     #   Writes dlp-ui-config.json
-│   ├── build_args()       #   Translates UI state → yt-dlp CLI arguments
-│   ├── PlaceholderEntry   #   tkinter Entry subclass with placeholder text
-│   └── App (tk.Tk)        #   Main window: _build_download, _build_settings
+├── dlp-ui.py                   # Entry point — imports App and runs mainloop
 │
-├── dlp-ui.ps1             # Alternate implementation — PowerShell/WinForms
-│                          #   Identical feature set; yt-dlp path is hardcoded
+├── dlp_gui/                    # The actual implementation
+│   ├── theme.py                #   Dark color palette (BG0, FG0, LOG_*, ...)
+│   ├── constants.py            #   Format tables, STEM_OPTIONS, TIP_NOTES,
+│   │                           #   TEMPO_CLICK_SCRIPT, version/URL strings
+│   ├── paths.py                #   BASE dir, config load/save, resource_path()
+│   ├── dependencies.py         #   find_ytdlp/ffmpeg/python, Spleeter/librosa
+│   │                           #   health checks, extract_bundled()
+│   ├── ytdlp_args.py           #   build_args() — UI state → yt-dlp CLI flags
+│   ├── widgets.py              #   PlaceholderEntry (tk.Entry subclass)
+│   ├── audio_tools.py          #   AudioToolsMixin — Spleeter split, tempo
+│   │                           #   detection, click-track generation
+│   ├── tip_jar.py              #   TipJarMixin — the post-download tip popup
+│   ├── app.py                  #   App(tk.Tk, *Mixins) — window + wiring
+│   │
+│   └── ui/
+│       ├── download_tab.py     #   DownloadTabMixin — Download tab + _start()
+│       └── settings_tab.py     #   SettingsTabMixin — Settings tab, all
+│                                #   dependency/update management
 │
-├── DLP-UI.bat             # Launcher — runs dlp-ui.ps1 via powershell.exe
+├── dlp-ui.ps1                  # Alternate implementation — PowerShell/WinForms
+│                                #   Identical feature set; yt-dlp path is hardcoded
 │
-├── build.bat              # One-click PyInstaller build → dist\dlp-ui.exe
-├── dlp-ui.spec            # PyInstaller spec (--onefile --windowed, UPX on)
+├── DLP-UI.bat                  # Launcher — runs dlp-ui.ps1 via powershell.exe
 │
-├── dlp-ui-config.json     # Runtime config (created on first use, not in repo)
-│                          #   Stores: ytdlp_path
+├── build.bat                   # One-click PyInstaller build → dist\dlp-ui.exe
+├── dlp-ui.spec                 # PyInstaller spec (--onefile --windowed, UPX on)
+├── setup.cfg                   # flake8 config (max-line-length = 99)
+│
+├── dlp-ui-config.json          # Runtime config (created on first use, not in repo)
+│                                #   Stores: ytdlp_path, ffmpeg_path, python_path
 │
 ├── dist/
-│   └── dlp-ui.exe         # Compiled standalone executable (build output)
+│   └── dlp-ui.exe               # Compiled standalone executable (build output)
 │
-└── build/                 # PyInstaller intermediate artefacts (safe to delete)
+└── build/                       # PyInstaller intermediate artefacts (safe to delete)
 ```
+
+Each module in `dlp_gui/` only imports what it needs from its
+siblings (e.g. `ui/download_tab.py` imports `STEM_OPTIONS` from
+`constants.py`, not the other way around) — there are no circular
+imports. `App` in `app.py` combines the `DownloadTabMixin`,
+`SettingsTabMixin`, `AudioToolsMixin` and `TipJarMixin` classes via
+multiple inheritance so the Tkinter widgets each tab creates
+(`self.txt_url`, `self.btn_dl`, etc.) remain on one shared `self`
+across all of them, exactly as they were in the original single-file
+version — this was a pure reorganization, not a behavior change.
 
 ---
 
@@ -365,13 +414,17 @@ Any path set via the UI is immediately saved to `dlp-ui-config.json` so it persi
 
 ```json
 {
-  "ytdlp_path": "C:\\ERAR\\yt-dlp\\dist\\yt-dlp.exe"
+  "ytdlp_path": "C:\\ERAR\\yt-dlp\\dist\\yt-dlp.exe",
+  "ffmpeg_path": "C:\\ffmpeg\\ffmpeg.exe",
+  "python_path": "C:\\Python310\\python.exe"
 }
 ```
 
 | Key | Type | Description |
 |---|---|---|
 | `ytdlp_path` | string | Absolute path to `yt-dlp.exe` chosen by the user or auto-detected |
+| `ffmpeg_path` | string | Absolute path to `ffmpeg.exe` chosen by the user or auto-detected |
+| `python_path` | string | Absolute path to the Python interpreter used to run Spleeter for audio splitting |
 
 > 💡 To reset to auto-detection on next launch, delete `dlp-ui-config.json` or clear the `ytdlp_path` value.
 

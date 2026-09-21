@@ -9,6 +9,7 @@ a = Analysis(
         ('deps/yt-dlp.exe',   '.'),
         ('deps/ffmpeg.exe',   'ffmpeg'),
         ('deps/ffprobe.exe',  'ffmpeg'),
+        ('qrcode.png',        '.'),
     ],
     hiddenimports=[],
     hookspath=[],
