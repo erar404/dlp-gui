@@ -25,12 +25,39 @@ def _no_window_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+def _env_with_ffmpeg(ffmpeg_path):
+    """Environment with ffmpeg's directory prepended to PATH.
+
+    Spleeter shells out to a bare `ffmpeg` command (via ffmpeg-python)
+    instead of taking an explicit binary path like yt-dlp does, so it
+    can't find our bundled ffmpeg.exe unless its folder is on PATH.
+    """
+    env = os.environ.copy()
+    if ffmpeg_path and os.path.isfile(ffmpeg_path):
+        ffmpeg_dir = os.path.dirname(ffmpeg_path)
+        env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def _format_tempo_tag(bpm_value):
     """Render a detected BPM value as a filename-safe tag."""
     try:
         return str(int(round(float(bpm_value))))
     except (TypeError, ValueError):
         return "unknown"
+
+
+def _spleeter_output_produced(base_dir, instruments):
+    """Whether at least one expected stem file actually got written.
+
+    Spleeter can log an internal error (e.g. a missing ffmpeg binary)
+    and still exit 0 without producing any output, so a clean exit
+    code alone isn't proof the separation worked.
+    """
+    return any(
+        os.path.isfile(os.path.join(base_dir, f"{inst}.wav"))
+        for inst in instruments
+    )
 
 
 def _probe_duration_seconds(ffmpeg_path, audio_path):
@@ -124,6 +151,7 @@ class AudioToolsMixin:
                     cmd, capture_output=True, text=True, encoding="utf-8",
                     errors="replace", timeout=300,
                     creationflags=_no_window_flags(),
+                    env=_env_with_ffmpeg(self.ffmpeg_path),
                 )
 
                 abi_mismatch = False
@@ -236,10 +264,19 @@ class AudioToolsMixin:
         def run_one_spleeter_pass(cmd):
             """Run one `spleeter separate` invocation, streaming its
             output into the log. Returns (returncode, abi_mismatch)."""
+            env = _env_with_ffmpeg(self.ffmpeg_path)
+            if shutil.which("ffmpeg", path=env.get("PATH", "")) is None:
+                self._q.put((
+                    "Spleeter can't find ffmpeg even with the bundled "
+                    "copy on its PATH — check the ffmpeg path in "
+                    "Settings → Dependencies.", "err",
+                ))
+                return 1, False
             self.split_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace",
                 creationflags=_no_window_flags(),
+                env=env,
             )
             abi_mismatch = False
             for line in self.split_proc.stdout:
@@ -318,6 +355,10 @@ class AudioToolsMixin:
                         "-o", dest_dir, audio_file,
                     ]
                     ec, abi_mismatch = run_one_spleeter_pass(cmd)
+                    if ec == 0 and not _spleeter_output_produced(
+                        tracks_dir, instruments,
+                    ):
+                        ec = 1
                     if ec == 0:
                         self._q.put((
                             f"Split complete — stems saved to "
@@ -325,7 +366,10 @@ class AudioToolsMixin:
                         ))
                     else:
                         self._q.put((
-                            f"Spleeter failed — exit code {ec}.", "fail"))
+                            f"Spleeter failed — exit code {ec}. See the "
+                            "log above for the real error (e.g. a "
+                            "missing ffmpeg).", "fail",
+                        ))
                         if abi_mismatch:
                             report_abi_hint()
                     return
@@ -341,6 +385,7 @@ class AudioToolsMixin:
                 ))
                 work_dir = os.path.join(
                     dest_dir, f".{base_name}_spleeter_tmp")
+                os.makedirs(work_dir, exist_ok=True)
                 chunk_dirs = []
                 try:
                     for i in range(n_chunks):
@@ -361,10 +406,16 @@ class AudioToolsMixin:
                             "-o", chunk_out, audio_file,
                         ]
                         ec, abi_mismatch = run_one_spleeter_pass(cmd)
+                        if ec == 0 and not _spleeter_output_produced(
+                            os.path.join(chunk_out, base_name), instruments,
+                        ):
+                            ec = 1
                         if ec != 0:
                             self._q.put((
                                 f"Spleeter failed on chunk {i + 1}/"
-                                f"{n_chunks} — exit code {ec}.", "fail",
+                                f"{n_chunks} — exit code {ec}. See the "
+                                "log above for the real error (e.g. a "
+                                "missing ffmpeg).", "fail",
                             ))
                             if abi_mismatch:
                                 report_abi_hint()
@@ -441,9 +492,15 @@ class AudioToolsMixin:
         threading.Thread(target=run, daemon=True).start()
 
     def _on_split_done(self):
+        if self._stop_requested:
+            self._log("Stopped by user.", "warn")
+            self._log("")
+            self._stop_requested = False
+            self._reset_buttons()
+            return
         if self._split_queue:
             self._start_next_split()
             return
         self._log("")
-        self.btn_dl.config(state="normal", text="Download")
+        self._reset_buttons()
         self._show_tip_prompt()

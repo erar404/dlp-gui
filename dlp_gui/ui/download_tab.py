@@ -3,6 +3,7 @@ checkboxes, the Download button, and the output log.
 """
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 from ..constants import (
     AUDIO_QUALITIES, FORMAT_TYPES, STEM_OPTIONS, VIDEO_QUALITIES,
 )
+from ..dependencies import check_librosa_installed, check_spleeter_installed
 from ..theme import (
     BG0, BG1, BG2, BG3, BLUE, FG0, FG1, FG2, LOG_FAIL, LOG_GRAY,
     LOG_GREEN, LOG_OK, LOG_RED, LOG_WARN, RED,
@@ -27,6 +29,19 @@ _STALE_HINTS = [
     "Precondition check failed",
     "Only images are available",
 ]
+
+_PLAYLIST_URL_RE = re.compile(r"[?&]list=([^&]+)", re.IGNORECASE)
+
+
+def _is_playlist_url(url):
+    """Best-effort check for whether a pasted link points at a YouTube
+    playlist (or a video that's part of one) rather than a single
+    video."""
+    if not url:
+        return False
+    if "/playlist" in url.lower():
+        return True
+    return bool(_PLAYLIST_URL_RE.search(url))
 
 
 class DownloadTabMixin:
@@ -43,11 +58,27 @@ class DownloadTabMixin:
             p, text="YouTube / Video URL", bg=BG0, fg=FG1,
             font=("Segoe UI", 10),
         ).grid(row=0, column=0, padx=16, pady=(14, 3), sticky="W")
+        url_wrap = tk.Frame(p, bg=BG0)
+        url_wrap.grid(row=1, column=0, padx=16, sticky="EW")
+        url_wrap.columnconfigure(0, weight=1)
+
         self.txt_url = PlaceholderEntry(
-            p, placeholder="Paste a link here...",
+            url_wrap, placeholder="Paste a link here...",
             bg=BG2, fg=FG0, insertbackground=FG0,
             relief="solid", bd=1, font=("Segoe UI", 9))
-        self.txt_url.grid(row=1, column=0, padx=16, sticky="EW", ipady=5)
+        self.txt_url.grid(row=0, column=0, sticky="EW", ipady=5)
+        self.txt_url.bind("<KeyRelease>", self._check_playlist_url)
+        self.txt_url.bind(
+            "<<Paste>>", lambda e: self.after(10, self._check_playlist_url))
+
+        self.lbl_playlist_warn = tk.Label(
+            url_wrap, text="", bg=BG0, fg=LOG_WARN, font=("Segoe UI", 9),
+            justify="left", anchor="w")
+        self.lbl_playlist_warn.bind(
+            "<Configure>",
+            lambda e: self.lbl_playlist_warn.configure(
+                wraplength=max(1, e.width - 4)),
+        )
 
         # Format / Quality
         fq = tk.Frame(p, bg=BG0)
@@ -109,15 +140,27 @@ class DownloadTabMixin:
         self.lbl_dep_banner.bind(
             "<Button-1>", lambda e: self._nb.select(self.tab_cfg))
 
-        # Download button
+        # Download / Stop buttons
+        btn_frame = tk.Frame(p, bg=BG0)
+        btn_frame.grid(row=7, column=0, padx=16, pady=(10, 0), sticky="EW")
+        btn_frame.columnconfigure(0, weight=1)
+
         self.btn_dl = tk.Button(
-            p, text="Download", bg=RED, fg=FG0, relief="flat", bd=0,
+            btn_frame, text="Download", bg=RED, fg=FG0, relief="flat", bd=0,
             cursor="hand2", font=("Segoe UI Semibold", 11),
             command=self._start, highlightthickness=1,
             highlightbackground=RED, activebackground="#b91c1c",
             activeforeground=FG0)
-        self.btn_dl.grid(
-            row=7, column=0, padx=16, pady=(10, 0), sticky="EW", ipady=10)
+        self.btn_dl.grid(row=0, column=0, sticky="EW", ipady=10)
+
+        self.btn_stop = tk.Button(
+            btn_frame, text="Stop", bg=BG2, fg=FG0, relief="flat", bd=0,
+            cursor="hand2", font=("Segoe UI Semibold", 11),
+            command=self._stop, state="disabled", highlightthickness=1,
+            highlightbackground=BG3, activebackground=BG3,
+            activeforeground=FG0)
+        self.btn_stop.grid(
+            row=0, column=1, padx=(8, 0), ipady=10, ipadx=14)
 
         # Log
         tk.Label(
@@ -142,7 +185,7 @@ class DownloadTabMixin:
         for tag, color in [
             ("err", LOG_RED), ("dl", LOG_GREEN), ("info", BLUE),
             ("gray", LOG_GRAY), ("blue", BLUE), ("ok", LOG_OK),
-            ("fail", LOG_FAIL),
+            ("fail", LOG_FAIL), ("warn", LOG_WARN),
         ]:
             self.log.tag_configure(tag, foreground=color)
 
@@ -168,7 +211,8 @@ class DownloadTabMixin:
             self.split_frame, text="Split audio tracks (Spleeter AI)",
             variable=self.v_split, bg=BG0, fg=FG1, selectcolor=BG2,
             activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10))
+            font=("Segoe UI", 10),
+            command=lambda: self._on_audio_checkbox("spleeter", self.v_split))
         self.chk_split.grid(
             row=0, column=0, padx=(8, 6), pady=(8, 2), sticky="W")
 
@@ -184,7 +228,8 @@ class DownloadTabMixin:
             self.split_frame, text="Generate click track (librosa)",
             variable=self.v_click, bg=BG0, fg=FG1, selectcolor=BG2,
             activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10))
+            font=("Segoe UI", 10),
+            command=lambda: self._on_audio_checkbox("librosa", self.v_click))
         self.chk_click.grid(
             row=1, column=0, columnspan=2, padx=(8, 6), pady=2, sticky="W")
 
@@ -194,7 +239,9 @@ class DownloadTabMixin:
             text="Merge click track into downloaded audio",
             variable=self.v_merge_click, bg=BG0, fg=FG1, selectcolor=BG2,
             activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10))
+            font=("Segoe UI", 10),
+            command=lambda: self._on_audio_checkbox(
+                "librosa", self.v_merge_click))
         self.chk_merge_click.grid(
             row=2, column=0, columnspan=2, padx=(24, 6), pady=2,
             sticky="W")
@@ -204,7 +251,8 @@ class DownloadTabMixin:
             self.split_frame, text="Show suggested tempo (BPM)",
             variable=self.v_tempo, bg=BG0, fg=FG1, selectcolor=BG2,
             activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10))
+            font=("Segoe UI", 10),
+            command=lambda: self._on_audio_checkbox("librosa", self.v_tempo))
         self.chk_tempo.grid(
             row=3, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
 
@@ -213,6 +261,71 @@ class DownloadTabMixin:
             font=("Segoe UI", 9, "bold"))
         self.lbl_tempo_result.grid(
             row=3, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
+
+    # ── Audio tools setup prompt ────────────────────────────────────────
+    def _on_audio_checkbox(self, kind, var):
+        """Called when a Spleeter/librosa-dependent checkbox is
+        toggled — offer to set up the audio tools right away if they
+        aren't ready yet, instead of only finding out at Download
+        time."""
+        if var.get():
+            self._ensure_audio_tools(kind)
+
+    def _ensure_audio_tools(self, kind):
+        dismissed = getattr(self, "_audio_prompt_dismissed", None)
+        if dismissed is None:
+            dismissed = {"spleeter": False, "librosa": False}
+            self._audio_prompt_dismissed = dismissed
+        if dismissed.get(kind):
+            return
+
+        label = (
+            "Splitting audio tracks (Spleeter)" if kind == "spleeter"
+            else "Tempo detection / click tracks (librosa)"
+        )
+        path = self.python_path
+
+        if not path or not os.path.isfile(path):
+            self._prompt_audio_tools_setup(
+                kind,
+                f"{label} needs a Python interpreter with audio tools "
+                "installed, and none is set up yet.",
+                use_embedded=True,
+            )
+            return
+
+        def run():
+            installed = (
+                check_spleeter_installed(path) if kind == "spleeter"
+                else check_librosa_installed(path)
+            )
+            if not installed:
+                self.after(
+                    0,
+                    lambda: self._prompt_audio_tools_setup(
+                        kind,
+                        f"{label} isn't installed for the configured "
+                        "Python interpreter yet.",
+                        use_embedded=False,
+                    ),
+                )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _prompt_audio_tools_setup(self, kind, reason, use_embedded):
+        proceed = messagebox.askyesno(
+            "Audio tools not installed",
+            f"{reason}\n\n"
+            "Download and set it up now? This can take a few minutes "
+            "(it fetches TensorFlow/librosa).",
+        )
+        if not proceed:
+            self._audio_prompt_dismissed[kind] = True
+            return
+        if use_embedded:
+            self._setup_embedded_python()
+        else:
+            self._install_spleeter()
 
     def _mono(self):
         try:
@@ -241,6 +354,24 @@ class DownloadTabMixin:
             self.v_tempo.set(False)
             self.lbl_tempo_result.config(text="")
             self.split_frame.grid_remove()
+
+    # ── Playlist warning ───────────────────────────────────────────────
+    def _check_playlist_url(self, _=None):
+        """Show a heads-up under the URL field when the pasted link
+        points at (or includes) a playlist, since that can trigger a
+        multi-file download."""
+        if _is_playlist_url(self.txt_url.value()):
+            self.lbl_playlist_warn.config(
+                text=(
+                    "⚠ This link includes a playlist — yt-dlp may "
+                    "download every video in it. Set Playlist Handling "
+                    "to 'Single video only' in Settings if you only "
+                    "want this one."
+                ),
+            )
+            self.lbl_playlist_warn.grid(row=1, column=0, pady=(4, 0), sticky="EW")
+        else:
+            self.lbl_playlist_warn.grid_remove()
 
     # ── Dependency reminder ────────────────────────────────────────────
     def _update_dep_banner(self):
@@ -303,6 +434,12 @@ class DownloadTabMixin:
         if self.proc is not None:
             ec = self.proc.returncode
             self.proc = None
+            if self._stop_requested:
+                self._log("Stopped by user.", "warn")
+                self._log("")
+                self._stop_requested = False
+                self._reset_buttons()
+                return
             if ec == 0:
                 self._log("Done — download complete.", "ok")
                 needs_post = (
@@ -314,13 +451,35 @@ class DownloadTabMixin:
                     self._start_next_split()
                     return
                 self._log("")
-                self.btn_dl.config(state="normal", text="Download")
+                self._reset_buttons()
                 self._show_tip_prompt()
                 return
             else:
                 self._log(f"Failed — exit code {ec}.", "fail")
         self._log("")
+        self._reset_buttons()
+
+    def _reset_buttons(self):
         self.btn_dl.config(state="normal", text="Download")
+        self.btn_stop.config(state="disabled")
+
+    def _stop(self):
+        """Kill the running yt-dlp / audio-tools process, if any, and
+        stop any further post-processing steps from starting."""
+        proc = self.proc
+        split_proc = getattr(self, "split_proc", None)
+        if proc is None and split_proc is None:
+            return
+        self._stop_requested = True
+        self._split_queue = []
+        self.btn_stop.config(state="disabled")
+        self._log("Stopping...", "warn")
+        for p in (proc, split_proc):
+            if p is not None:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
 
     # ── Browse ─────────────────────────────────────────────────────────
     def _browse(self):
@@ -374,6 +533,16 @@ class DownloadTabMixin:
             )
             return
 
+        if _is_playlist_url(url) and self.v_playlist.get() != "single":
+            if not messagebox.askyesno(
+                "Playlist detected",
+                "This link appears to include a YouTube playlist. "
+                "Continuing will download every video in it, which can "
+                "take a while and use significant disk space.\n\n"
+                "Continue and download the whole playlist?",
+            ):
+                return
+
         s = self._gather_settings()
         args = build_args(fmt, qual, dest, url, s)
 
@@ -425,7 +594,9 @@ class DownloadTabMixin:
             )
             return
 
+        self._stop_requested = False
         self.btn_dl.config(state="disabled", text="Downloading...")
+        self.btn_stop.config(state="normal")
         self._log(f"Starting: {url}", "blue")
         self._log(f"  Format  : {fmt} | {qual}", "gray")
         self._log(f"  Dest    : {dest}", "gray")
