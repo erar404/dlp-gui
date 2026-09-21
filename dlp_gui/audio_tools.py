@@ -25,6 +25,14 @@ def _no_window_flags() -> int:
     return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
+def _format_tempo_tag(bpm_value):
+    """Render a detected BPM value as a filename-safe tag."""
+    try:
+        return str(int(round(float(bpm_value))))
+    except (TypeError, ValueError):
+        return "unknown"
+
+
 def _probe_duration_seconds(ffmpeg_path, audio_path):
     """Return the audio's duration in seconds via ffmpeg, or None."""
     try:
@@ -73,6 +81,7 @@ class AudioToolsMixin:
 
         base_name = os.path.splitext(os.path.basename(audio_file))[0]
         dest_dir = os.path.dirname(audio_file)
+        results = {}
         self.btn_dl.config(state="disabled", text="Processing audio...")
 
         def report_abi_hint():
@@ -174,6 +183,41 @@ class AudioToolsMixin:
                     if fr.returncode == 0:
                         self._q.put(
                             (f"Click track saved: {click_mp3}", "ok"))
+                        results["click_mp3"] = click_mp3
+
+                        if self._merge_click_requested:
+                            tempo_tag = _format_tempo_tag(bpm_value)
+                            merged_mp3 = os.path.join(
+                                dest_dir,
+                                f"{base_name}_with_click_"
+                                f"{tempo_tag}.mp3",
+                            )
+                            merge_cmd = [
+                                self.ffmpeg_path, "-y",
+                                "-i", audio_file, "-i", click_mp3,
+                                "-filter_complex",
+                                "amix=inputs=2:duration=longest:"
+                                "normalize=0",
+                                "-codec:a", "libmp3lame",
+                                "-qscale:a", "2", merged_mp3,
+                            ]
+                            mr = subprocess.run(
+                                merge_cmd, capture_output=True,
+                                text=True,
+                                creationflags=_no_window_flags(),
+                            )
+                            if mr.returncode == 0:
+                                self._q.put((
+                                    "Click track merged into audio: "
+                                    f"{merged_mp3}", "ok",
+                                ))
+                                results["merged_mp3"] = merged_mp3
+                            else:
+                                self._q.put((
+                                    "Failed to merge click track into "
+                                    "audio — ffmpeg exit code "
+                                    f"{mr.returncode}.", "fail",
+                                ))
                     else:
                         self._q.put((
                             "Failed to encode click track — ffmpeg exit "
@@ -339,6 +383,45 @@ class AudioToolsMixin:
             except Exception as exc:
                 self._q.put((f"Error launching Spleeter: {exc}", "err"))
 
+        def finalize_outputs():
+            """Gather the downloaded audio plus any generated click/
+            merged files into one output folder named after the video —
+            or, when Spleeter split the audio, into the stems folder it
+            already created."""
+            tracks_dir = os.path.join(dest_dir, f"{base_name}_tracks")
+            split_ok = self._split_requested and os.path.isdir(tracks_dir)
+            has_click_outputs = bool(
+                results.get("click_mp3") or results.get("merged_mp3"))
+
+            if not split_ok and not has_click_outputs:
+                return
+
+            container = (
+                tracks_dir if split_ok
+                else os.path.join(dest_dir, base_name)
+            )
+            os.makedirs(container, exist_ok=True)
+
+            for src in (
+                audio_file, results.get("click_mp3"),
+                results.get("merged_mp3"),
+            ):
+                if not src or not os.path.isfile(src):
+                    continue
+                target = os.path.join(container, os.path.basename(src))
+                if os.path.abspath(src) == os.path.abspath(target):
+                    continue
+                try:
+                    shutil.move(src, target)
+                except OSError as exc:
+                    self._q.put((
+                        f"Could not move '{os.path.basename(src)}' "
+                        f"into output folder: {exc}", "err",
+                    ))
+
+            self._q.put((
+                f"Output files organized in: {container}", "ok"))
+
         def run():
             try:
                 run_tempo_click()
@@ -348,6 +431,11 @@ class AudioToolsMixin:
                 run_split()
             except Exception as exc:
                 self._q.put((f"Split step crashed: {exc}", "err"))
+            try:
+                finalize_outputs()
+            except Exception as exc:
+                self._q.put((
+                    f"Error organizing output files: {exc}", "err"))
             self._q.put("__SPLIT_DONE__")
 
         threading.Thread(target=run, daemon=True).start()

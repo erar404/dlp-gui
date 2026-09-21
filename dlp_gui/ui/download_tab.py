@@ -188,6 +188,17 @@ class DownloadTabMixin:
         self.chk_click.grid(
             row=1, column=0, columnspan=2, padx=(8, 6), pady=2, sticky="W")
 
+        self.v_merge_click = tk.BooleanVar()
+        self.chk_merge_click = tk.Checkbutton(
+            self.split_frame,
+            text="Merge click track into downloaded audio",
+            variable=self.v_merge_click, bg=BG0, fg=FG1, selectcolor=BG2,
+            activebackground=BG0, activeforeground=FG0,
+            font=("Segoe UI", 10))
+        self.chk_merge_click.grid(
+            row=2, column=0, columnspan=2, padx=(24, 6), pady=2,
+            sticky="W")
+
         self.v_tempo = tk.BooleanVar()
         self.chk_tempo = tk.Checkbutton(
             self.split_frame, text="Show suggested tempo (BPM)",
@@ -195,13 +206,13 @@ class DownloadTabMixin:
             activebackground=BG0, activeforeground=FG0,
             font=("Segoe UI", 10))
         self.chk_tempo.grid(
-            row=2, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
+            row=3, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
 
         self.lbl_tempo_result = tk.Label(
             self.split_frame, text="", bg=BG0, fg=BLUE,
             font=("Segoe UI", 9, "bold"))
         self.lbl_tempo_result.grid(
-            row=2, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
+            row=3, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
 
     def _mono(self):
         try:
@@ -226,6 +237,7 @@ class DownloadTabMixin:
         else:
             self.v_split.set(False)
             self.v_click.set(False)
+            self.v_merge_click.set(False)
             self.v_tempo.set(False)
             self.lbl_tempo_result.config(text="")
             self.split_frame.grid_remove()
@@ -390,7 +402,10 @@ class DownloadTabMixin:
 
         self._split_requested = fmt == "MP3" and self.v_split.get()
         self._tempo_requested = fmt == "MP3" and self.v_tempo.get()
-        self._click_requested = fmt == "MP3" and self.v_click.get()
+        self._merge_click_requested = fmt == "MP3" and self.v_merge_click.get()
+        self._click_requested = (
+            fmt == "MP3" and (self.v_click.get() or self.v_merge_click.get())
+        )
         self._split_queue = []
         self.lbl_tempo_result.config(text="")
         needs_python = (

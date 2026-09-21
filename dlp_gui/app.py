@@ -41,6 +41,7 @@ class App(
         self._split_requested = False
         self._tempo_requested = False
         self._click_requested = False
+        self._merge_click_requested = False
         self._split_queue = []
         self._build()
         self._poll()
