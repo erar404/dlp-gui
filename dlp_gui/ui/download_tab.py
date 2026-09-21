@@ -32,6 +32,13 @@ _STALE_HINTS = [
 
 _PLAYLIST_URL_RE = re.compile(r"[?&]list=([^&]+)", re.IGNORECASE)
 
+# Marker prefix asked of yt-dlp (via --print) to report the final,
+# post-processed file path unambiguously — far more reliable than
+# scraping the wording of whichever postprocessor log line happens to
+# fire (it varies: "[ExtractAudio] Destination:", "Not converting
+# audio...", "[Merger] Merging formats into...", etc).
+_SPLIT_TARGET_PREFIX = "SPLIT_TARGET:"
+
 
 def _is_playlist_url(url):
     """Best-effort check for whether a pasted link points at a YouTube
@@ -546,6 +553,13 @@ class DownloadTabMixin:
         s = self._gather_settings()
         args = build_args(fmt, qual, dest, url, s)
 
+        # Without this, yt-dlp encodes its console output (filenames
+        # in log lines, --print output, etc.) using the system's
+        # legacy codepage once stdout is piped rather than a real
+        # console — silently mangling non-ASCII titles even though the
+        # file itself is saved with the correct Unicode name.
+        args = ["--encoding", "utf-8"] + args
+
         if s["recode_to"] and s["recode_to"] != "None":
             args = ["--recode-video", s["recode_to"].lower()] + args
 
@@ -607,6 +621,12 @@ class DownloadTabMixin:
         if ffmpeg_dir and not shutil.which("ffmpeg"):
             args = ["--ffmpeg-location", ffmpeg_dir] + args
 
+        if needs_python:
+            args = args + [
+                "--print",
+                f"after_move:{_SPLIT_TARGET_PREFIX}%(filepath)s",
+            ]
+
         cmd = [self.ytdlp_path] + args
 
         def run():
@@ -629,13 +649,12 @@ class DownloadTabMixin:
                     line = line.rstrip()
                     if not line:
                         continue
-                    needs_post = (
-                        self._split_requested or self._tempo_requested
-                        or self._click_requested
-                    )
-                    if needs_post and "[ExtractAudio] Destination:" in line:
-                        out_path = line.split("Destination:", 1)[1].strip()
-                        self._split_queue.append(out_path)
+                    if line.startswith(_SPLIT_TARGET_PREFIX):
+                        out_path = line[
+                            len(_SPLIT_TARGET_PREFIX):].strip()
+                        if out_path:
+                            self._split_queue.append(out_path)
+                        continue
                     if any(h in line for h in _STALE_HINTS):
                         stale_detected = True
                     if "ERROR" in line or line.startswith("ERR:"):

@@ -26,16 +26,27 @@ def _no_window_flags() -> int:
 
 
 def _env_with_ffmpeg(ffmpeg_path):
-    """Environment with ffmpeg's directory prepended to PATH.
+    """Environment with ffmpeg's directory prepended to PATH, and I/O
+    forced to UTF-8.
 
     Spleeter shells out to a bare `ffmpeg` command (via ffmpeg-python)
     instead of taking an explicit binary path like yt-dlp does, so it
     can't find our bundled ffmpeg.exe unless its folder is on PATH.
+
+    Separately, once its stdout is piped (as ours always is) rather
+    than a real console, Python falls back to the legacy Windows
+    codepage for text output — so Spleeter's own logging (e.g. "File
+    <path> written succesfully") crashes with UnicodeEncodeError on
+    any non-ASCII filename, such as a title in Thai or another
+    non-Latin script. PYTHONIOENCODING/PYTHONUTF8 force UTF-8
+    regardless.
     """
     env = os.environ.copy()
     if ffmpeg_path and os.path.isfile(ffmpeg_path):
         ffmpeg_dir = os.path.dirname(ffmpeg_path)
         env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     return env
 
 
