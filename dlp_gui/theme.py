@@ -1,18 +1,37 @@
-"""Dark color palette shared across every widget in the app."""
+"""Design tokens shared across every widget in the app.
 
-BG0 = "#121212"
-BG1 = "#1c1c1c"
-BG2 = "#282828"
-BG3 = "#373737"
-FG0 = "#ffffff"
-FG1 = "#aaaaaa"
-FG2 = "#6e6e6e"
-RED = "#dc2626"
-BLUE = "#64a0ff"
+Palette concept: a dark equipment-panel look — cool graphite surfaces
+with a single warm amber accent, the kind of warmth you'd find on a
+tape deck's VU meter or a mixing console's gain knob. This app is
+fundamentally about recording/mixing/downloading media, so the accent
+leans into that rather than a generic SaaS blue or a "danger" red.
+"""
 
-LOG_GREEN = "#64dc64"
-LOG_RED = "#ff6464"
-LOG_GRAY = "#d2d2d2"
-LOG_OK = "#50dc50"
-LOG_FAIL = "#ff5050"
-LOG_WARN = "#f59e0b"
+# ── Surfaces ─────────────────────────────────────────────────────────────
+BG0 = "#15171c"   # app background
+BG1 = "#1b1e24"   # recessed panels: log console, tab track
+BG2 = "#20242b"   # input fields, cards
+BG3 = "#2c313b"   # borders, dividers
+BG4 = "#3a4049"   # stronger borders, hover surfaces
+
+# ── Text ─────────────────────────────────────────────────────────────────
+FG0 = "#f1efe9"   # primary text (warm off-white, not stark #fff)
+FG1 = "#a3a8b3"   # field labels, secondary text
+FG2 = "#6c7280"   # helper / muted text
+FG3 = "#454b56"   # placeholder, disabled
+
+# ── Accent ───────────────────────────────────────────────────────────────
+ACCENT = "#e2a13d"        # primary actions, focus rings, "needs attention"
+ACCENT_HOVER = "#efb156"
+ACCENT_INK = "#211703"    # text drawn on top of an accent fill
+
+RED = "#e2585d"           # stop / destructive only
+BLUE = "#5b9bd6"          # informational (kept distinct from the accent)
+
+# ── Log console ──────────────────────────────────────────────────────────
+LOG_GREEN = "#7bdb9e"
+LOG_RED = "#f2726f"
+LOG_GRAY = "#b7bcc6"
+LOG_OK = "#63cf8a"
+LOG_FAIL = "#ee6a67"
+LOG_WARN = ACCENT

@@ -50,12 +50,22 @@ def _env_with_ffmpeg(ffmpeg_path):
     return env
 
 
-def _format_tempo_tag(bpm_value):
-    """Render a detected BPM value as a filename-safe tag."""
-    try:
-        return str(int(round(float(bpm_value))))
-    except (TypeError, ValueError):
-        return "unknown"
+def _slugify_key(key_value):
+    """'C major' -> 'Cmaj', 'F# minor' -> 'F#min' — filename-safe."""
+    if not key_value:
+        return "key"
+    parts = key_value.strip().split()
+    if len(parts) != 2:
+        return re.sub(r"\s+", "", key_value)
+    root, mode = parts
+    return f"{root}{'maj' if mode.lower().startswith('maj') else 'min'}"
+
+
+def _slugify_timesig(timesig_value):
+    """'4/4' -> '4-4' — '/' can't appear in a filename."""
+    if not timesig_value:
+        return "timesig"
+    return timesig_value.replace("/", "-")
 
 
 def _spleeter_output_produced(base_dir, instruments):
@@ -157,6 +167,10 @@ class AudioToolsMixin:
                 cmd = [
                     self.python_path, "-c", TEMPO_CLICK_SCRIPT, audio_file,
                     "1" if self._click_requested else "0", tmp_wav or "",
+                    str(getattr(self, "_tempo_mult", 1.0)),
+                    "1" if getattr(self, "_no_accents", False) else "0",
+                    self.spn_tempo_min.get(), self.spn_tempo_max.get(),
+                    self.spn_sensitivity.get(),
                 ]
                 r = subprocess.run(
                     cmd, capture_output=True, text=True, encoding="utf-8",
@@ -167,12 +181,18 @@ class AudioToolsMixin:
 
                 abi_mismatch = False
                 bpm_value = None
+                key_value = None
+                timesig_value = None
                 for line in (r.stdout or "").splitlines():
                     line = line.rstrip()
                     if not line:
                         continue
                     if line.startswith("TEMPO:"):
                         bpm_value = line.split(":", 1)[1].strip()
+                    elif line.startswith("KEY:"):
+                        key_value = line.split(":", 1)[1].strip()
+                    elif line.startswith("TIMESIG:"):
+                        timesig_value = line.split(":", 1)[1].strip()
                     elif not line.startswith("CLICK_WRITTEN:"):
                         self._q.put((line, "gray"))
                 for line in (r.stderr or "").splitlines():
@@ -193,14 +213,21 @@ class AudioToolsMixin:
                     return
 
                 if bpm_value is not None:
-                    self._q.put((
-                        f"Suggested tempo: {bpm_value} BPM — "
-                        f"{os.path.basename(audio_file)}", "ok",
-                    ))
+                    summary = f"Suggested tempo: {bpm_value} BPM"
+                    if key_value:
+                        summary += f" — Key: {key_value.title()}"
+                    if timesig_value:
+                        summary += f" — Time: {timesig_value}"
+                    summary += f" — {os.path.basename(audio_file)}"
+                    self._q.put((summary, "ok"))
                     self.after(
                         0,
-                        lambda b=bpm_value: self.lbl_tempo_result.config(
-                            text=f"{b} BPM"),
+                        lambda b=bpm_value, k=key_value, t=timesig_value:
+                        self.lbl_tempo_result.config(
+                            text=(
+                                f"{b} BPM · {k.title() if k else '?'} · "
+                                f"{t or '?'}"
+                            )),
                     )
 
                 click_ready = (
@@ -208,8 +235,12 @@ class AudioToolsMixin:
                     and os.path.isfile(tmp_wav)
                 )
                 if click_ready:
+                    key_slug = _slugify_key(key_value)
+                    timesig_slug = _slugify_timesig(timesig_value)
                     click_mp3 = os.path.join(
-                        dest_dir, f"{base_name}_click.mp3")
+                        dest_dir,
+                        f"{base_name}_click_{key_slug}_{timesig_slug}.mp3",
+                    )
                     ffmpeg_cmd = [
                         self.ffmpeg_path, "-y", "-i", tmp_wav,
                         "-codec:a", "libmp3lame", "-qscale:a", "2",
@@ -225,11 +256,10 @@ class AudioToolsMixin:
                         results["click_mp3"] = click_mp3
 
                         if self._merge_click_requested:
-                            tempo_tag = _format_tempo_tag(bpm_value)
                             merged_mp3 = os.path.join(
                                 dest_dir,
-                                f"{base_name}_with_click_"
-                                f"{tempo_tag}.mp3",
+                                f"{base_name}_{key_slug}_"
+                                f"{timesig_slug}.mp3",
                             )
                             merge_cmd = [
                                 self.ffmpeg_path, "-y",
@@ -346,12 +376,19 @@ class AudioToolsMixin:
                 instruments = STEM_INSTRUMENTS[stems]
                 tracks_dir = os.path.join(dest_dir, f"{base_name}_tracks")
 
+                # Multichannel Wiener filtering — Spleeter's own
+                # optional post-separation refinement. Cleaner stems,
+                # noticeably slower; no retraining involved, it's a
+                # pure inference-time flag.
+                mwf_flag = ["--mwf"] if self.v_mwf.get() else []
+
                 self.after(
                     0,
                     lambda: self.btn_dl.config(text="Splitting audio..."),
                 )
                 self._q.put((
-                    f"Splitting with Spleeter ({stems} stems): "
+                    f"Splitting with Spleeter ({stems} stems"
+                    f"{', MWF filter' if mwf_flag else ''}): "
                     f"{os.path.basename(audio_file)}", "blue",
                 ))
 
@@ -363,7 +400,7 @@ class AudioToolsMixin:
                         self.python_path, "-m", "spleeter", "separate",
                         "-p", f"spleeter:{stems}stems",
                         "-f", "{filename}_tracks/{instrument}.{codec}",
-                        "-o", dest_dir, audio_file,
+                        "-o", dest_dir, *mwf_flag, audio_file,
                     ]
                     ec, abi_mismatch = run_one_spleeter_pass(cmd)
                     if ec == 0 and not _spleeter_output_produced(
@@ -414,7 +451,7 @@ class AudioToolsMixin:
                             "-p", f"spleeter:{stems}stems",
                             "-s", str(offset),
                             "-d", str(SPLEETER_CHUNK_SECONDS),
-                            "-o", chunk_out, audio_file,
+                            "-o", chunk_out, *mwf_flag, audio_file,
                         ]
                         ec, abi_mismatch = run_one_spleeter_pass(cmd)
                         if ec == 0 and not _spleeter_output_produced(

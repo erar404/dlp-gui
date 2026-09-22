@@ -23,3 +23,6 @@ dlp-ui-config.json
 *.exe
 *.rar
 *.zip
+
+# Generated macOS app icon (build.sh regenerates it from favicon.ico)
+icon.icns

@@ -2,6 +2,7 @@
 runtime used for Spleeter / librosa audio tools.
 """
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -9,8 +10,32 @@ from pathlib import Path
 
 from .paths import BASE
 
-YTDLP_RELEASE_URL = (
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+IS_WINDOWS = sys.platform == "win32"
+IS_MACOS = sys.platform == "darwin"
+
+# Windows ships every dependency as a bare .exe; macOS/Linux binaries
+# carry no extension.
+EXE = ".exe" if IS_WINDOWS else ""
+
+
+def _mac_arch() -> str:
+    """python-build-standalone's macOS asset naming: 'aarch64' on
+    Apple Silicon, 'x86_64' on Intel."""
+    return "aarch64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
+
+
+YTDLP_RELEASE_URL = {
+    "win32": (
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+        "yt-dlp.exe"
+    ),
+    "darwin": (
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
+        "yt-dlp_macos"
+    ),
+}.get(
+    sys.platform,
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp",
 )
 
 FFMPEG_RELEASE_URL = (
@@ -28,6 +53,13 @@ COMMON_YTDLP_PATHS = [
     str(Path.home() / "AppData" / "Local" / "yt-dlp" / "yt-dlp.exe"),
     str(BASE / "yt-dlp" / "yt-dlp.exe"),
     str(BASE / "yt-dlp.exe"),
+    # macOS / Homebrew / Linux
+    "/opt/homebrew/bin/yt-dlp",
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
+    str(Path.home() / ".local" / "bin" / "yt-dlp"),
+    str(BASE / "yt-dlp" / "yt-dlp"),
+    str(BASE / "yt-dlp"),
 ]
 
 COMMON_FFMPEG_PATHS = [
@@ -38,6 +70,14 @@ COMMON_FFMPEG_PATHS = [
         / "ffmpeg.exe"),
     str(BASE / "ffmpeg" / "ffmpeg.exe"),
     str(BASE / "ffmpeg.exe"),
+    # macOS / Homebrew / Linux
+    "/opt/homebrew/bin/ffmpeg",
+    "/opt/homebrew/opt/ffmpeg/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    "/usr/local/opt/ffmpeg/bin/ffmpeg",
+    "/usr/bin/ffmpeg",
+    str(BASE / "ffmpeg" / "ffmpeg"),
+    str(BASE / "ffmpeg"),
 ]
 
 # Spleeter only ships wheels for Python 3.6-3.10 (needs the stdlib
@@ -45,15 +85,33 @@ COMMON_FFMPEG_PATHS = [
 # portable interpreter — the user never has to install Python
 # system-wide.
 EMBED_PYTHON_VERSION = "3.10.11"
-EMBED_PYTHON_URL = (
+EMBED_PYTHON_URL_WINDOWS = (
     f"https://www.python.org/ftp/python/{EMBED_PYTHON_VERSION}/"
     f"python-{EMBED_PYTHON_VERSION}-embed-amd64.zip"
 )
+
+# macOS has no equivalent "embeddable zip" from python.org, so the
+# portable runtime there comes from python-build-standalone instead —
+# fully relocatable, self-contained CPython builds meant for exactly
+# this (bundling a private interpreter in an app). Pinned to a known-
+# good release rather than "latest" so the download URL doesn't shift
+# under us.
+EMBED_PYTHON_VERSION_MACOS = "3.10.21"
+EMBED_PYTHON_BUILD_TAG_MACOS = "20260901"
+EMBED_PYTHON_URL_MACOS = (
+    "https://github.com/astral-sh/python-build-standalone/releases/"
+    f"download/{EMBED_PYTHON_BUILD_TAG_MACOS}/"
+    f"cpython-{EMBED_PYTHON_VERSION_MACOS}+{EMBED_PYTHON_BUILD_TAG_MACOS}"
+    f"-{_mac_arch()}-apple-darwin-install_only.tar.gz"
+)
+
+EMBED_PYTHON_URL = EMBED_PYTHON_URL_MACOS if IS_MACOS else EMBED_PYTHON_URL_WINDOWS
+
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
 
 def _no_window_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    return subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
 
 
 def find_ytdlp() -> str:
@@ -62,7 +120,7 @@ def find_ytdlp() -> str:
     if found:
         return found
     if getattr(sys, "frozen", False):
-        p = Path(sys._MEIPASS) / "yt-dlp.exe"
+        p = Path(sys._MEIPASS) / f"yt-dlp{EXE}"
         if p.exists():
             return str(p)
     for p in COMMON_YTDLP_PATHS:
@@ -77,7 +135,7 @@ def find_ffmpeg() -> str:
     if found:
         return found
     if getattr(sys, "frozen", False):
-        p = Path(sys._MEIPASS) / "ffmpeg" / "ffmpeg.exe"
+        p = Path(sys._MEIPASS) / "ffmpeg" / f"ffmpeg{EXE}"
         if p.exists():
             return str(p)
     for p in COMMON_FFMPEG_PATHS:
@@ -88,7 +146,7 @@ def find_ffmpeg() -> str:
 
 def find_python() -> str:
     """Return the first usable Python interpreter path, or empty string."""
-    for name in ("python", "python3", "py"):
+    for name in ("python3", "python", "py"):
         found = shutil.which(name)
         if found:
             return found
@@ -98,7 +156,10 @@ def find_python() -> str:
 def find_embedded_python() -> str:
     """Return the app's private, portable Python interpreter path, or
     empty string if it hasn't been set up yet."""
-    p = BASE / "python-embed" / "python.exe"
+    if IS_MACOS:
+        p = BASE / "python-embed" / "bin" / "python3"
+    else:
+        p = BASE / "python-embed" / "python.exe"
     return str(p) if p.is_file() else ""
 
 
@@ -148,15 +209,18 @@ def extract_bundled() -> None:
         return
     bundle = Path(sys._MEIPASS)
     pairs = [
-        (bundle / "yt-dlp.exe", BASE / "yt-dlp" / "yt-dlp.exe"),
-        (bundle / "ffmpeg" / "ffmpeg.exe", BASE / "ffmpeg" / "ffmpeg.exe"),
-        (bundle / "ffmpeg" / "ffprobe.exe",
-         BASE / "ffmpeg" / "ffprobe.exe"),
+        (bundle / f"yt-dlp{EXE}", BASE / "yt-dlp" / f"yt-dlp{EXE}"),
+        (bundle / "ffmpeg" / f"ffmpeg{EXE}",
+         BASE / "ffmpeg" / f"ffmpeg{EXE}"),
+        (bundle / "ffmpeg" / f"ffprobe{EXE}",
+         BASE / "ffmpeg" / f"ffprobe{EXE}"),
     ]
     for src, dst in pairs:
         try:
             if src.exists() and not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
+                if not IS_WINDOWS:
+                    dst.chmod(dst.stat().st_mode | 0o111)
         except Exception:
             pass  # Non-fatal — sys._MEIPASS fallback still works

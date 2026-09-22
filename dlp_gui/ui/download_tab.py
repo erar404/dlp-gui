@@ -11,15 +11,17 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
+from .. import fonts, widgets
 from ..constants import (
-    AUDIO_QUALITIES, FORMAT_TYPES, STEM_OPTIONS, VIDEO_QUALITIES,
+    AUDIO_QUALITIES, FORMAT_TYPES, STEM_OPTIONS, TEMPO_MULTIPLIERS,
+    VIDEO_QUALITIES,
 )
 from ..dependencies import check_librosa_installed, check_spleeter_installed
 from ..theme import (
-    BG0, BG1, BG2, BG3, BLUE, FG0, FG1, FG2, LOG_FAIL, LOG_GRAY,
-    LOG_GREEN, LOG_OK, LOG_RED, LOG_WARN, RED,
+    ACCENT, ACCENT_HOVER, ACCENT_INK, BG0, BG1, BG2, BG3, BLUE, FG0, FG1,
+    FG2, LOG_FAIL, LOG_GRAY, LOG_GREEN, LOG_OK, LOG_RED, LOG_WARN,
 )
 from ..widgets import PlaceholderEntry
 from ..ytdlp_args import build_args
@@ -60,26 +62,28 @@ class DownloadTabMixin:
         p.columnconfigure(0, weight=1)
         p.rowconfigure(9, weight=1)   # log row expands
 
-        # URL
+        # URL — the one thing this whole app is for, so it's the
+        # largest, most prominent field on the page.
         tk.Label(
-            p, text="YouTube / Video URL", bg=BG0, fg=FG1,
-            font=("Segoe UI", 10),
-        ).grid(row=0, column=0, padx=16, pady=(14, 3), sticky="W")
+            p, text="Video URL", bg=BG0, fg=FG1, font=fonts.body(11),
+        ).grid(row=0, column=0, padx=18, pady=(18, 4), sticky="W")
         url_wrap = tk.Frame(p, bg=BG0)
-        url_wrap.grid(row=1, column=0, padx=16, sticky="EW")
+        url_wrap.grid(row=1, column=0, padx=18, sticky="EW")
         url_wrap.columnconfigure(0, weight=1)
 
         self.txt_url = PlaceholderEntry(
             url_wrap, placeholder="Paste a link here...",
             bg=BG2, fg=FG0, insertbackground=FG0,
-            relief="solid", bd=1, font=("Segoe UI", 9))
-        self.txt_url.grid(row=0, column=0, sticky="EW", ipady=5)
+            relief="flat", bd=0, highlightthickness=1,
+            highlightbackground=BG3, highlightcolor=ACCENT,
+            font=fonts.body(12))
+        self.txt_url.grid(row=0, column=0, sticky="EW", ipady=10)
         self.txt_url.bind("<KeyRelease>", self._check_playlist_url)
         self.txt_url.bind(
             "<<Paste>>", lambda e: self.after(10, self._check_playlist_url))
 
         self.lbl_playlist_warn = tk.Label(
-            url_wrap, text="", bg=BG0, fg=LOG_WARN, font=("Segoe UI", 9),
+            url_wrap, text="", bg=BG0, fg=ACCENT, font=fonts.small(),
             justify="left", anchor="w")
         self.lbl_playlist_warn.bind(
             "<Configure>",
@@ -89,98 +93,107 @@ class DownloadTabMixin:
 
         # Format / Quality
         fq = tk.Frame(p, bg=BG0)
-        fq.grid(row=2, column=0, padx=16, pady=(10, 0), sticky="EW")
+        fq.grid(row=2, column=0, padx=18, pady=(16, 0), sticky="EW")
         fq.columnconfigure(0, weight=1)
         fq.columnconfigure(1, weight=1)
-        tk.Label(
-            fq, text="Format", bg=BG0, fg=FG1, font=("Segoe UI", 10),
-        ).grid(row=0, column=0, sticky="W")
-        tk.Label(
-            fq, text="Quality / Resolution", bg=BG0, fg=FG1,
-            font=("Segoe UI", 10),
-        ).grid(row=0, column=1, padx=(10, 0), sticky="W")
-        self.cbo_fmt = ttk.Combobox(
-            fq, values=list(FORMAT_TYPES), state="readonly",
-            font=("Segoe UI", 9))
-        self.cbo_fmt.grid(row=1, column=0, sticky="EW", ipady=2, pady=(3, 0))
-        self.cbo_fmt.current(0)
-        self.cbo_qual = ttk.Combobox(
-            fq, values=list(VIDEO_QUALITIES), state="readonly",
-            font=("Segoe UI", 9))
+        widgets.field_label(fq, "Format", bg=BG0).grid(
+            row=0, column=0, sticky="W")
+        widgets.field_label(fq, "Quality / resolution", bg=BG0).grid(
+            row=0, column=1, padx=(10, 0), sticky="W")
+        self.cbo_fmt = widgets.combobox(fq, list(FORMAT_TYPES))
+        self.cbo_fmt.grid(row=1, column=0, sticky="EW", ipady=4, pady=(4, 0))
+        self.cbo_qual = widgets.combobox(fq, list(VIDEO_QUALITIES))
         self.cbo_qual.grid(
-            row=1, column=1, sticky="EW", padx=(10, 0), ipady=2, pady=(3, 0))
-        self.cbo_qual.current(0)
+            row=1, column=1, sticky="EW", padx=(10, 0), ipady=4, pady=(4, 0))
         self.cbo_fmt.bind("<<ComboboxSelected>>", self._fmt_changed)
 
         self._build_audio_tools_frame(p)
 
         # Destination
-        tk.Label(
-            p, text="Destination Folder", bg=BG0, fg=FG1,
-            font=("Segoe UI", 10),
-        ).grid(row=4, column=0, padx=16, pady=(10, 3), sticky="W")
+        widgets.field_label(p, "Destination folder", bg=BG0).grid(
+            row=4, column=0, padx=18, pady=(16, 4), sticky="W")
         dest = tk.Frame(p, bg=BG0)
-        dest.grid(row=5, column=0, padx=16, sticky="EW")
+        dest.grid(row=5, column=0, padx=18, sticky="EW")
         dest.columnconfigure(0, weight=1)
-        self.txt_dest = tk.Entry(
-            dest, bg=BG2, fg=FG0, insertbackground=FG0,
-            relief="solid", bd=1, font=("Segoe UI", 9))
+        self.txt_dest = widgets.entry(dest)
         self.txt_dest.insert(0, str(Path.home() / "Videos"))
-        self.txt_dest.grid(row=0, column=0, sticky="EW", ipady=5)
-        tk.Button(
-            dest, text="Browse...", bg=BG2, fg=FG0, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 9), command=self._browse,
-            highlightthickness=1, highlightbackground=BG3,
-            activebackground=BG3, activeforeground=FG0,
-        ).grid(row=0, column=1, padx=(6, 0), ipady=5)
+        self.txt_dest.grid(row=0, column=0, sticky="EW", ipady=8)
+        widgets.secondary_button(dest, "Browse…", self._browse).grid(
+            row=0, column=1, padx=(8, 0), ipady=8)
 
         # Dependency reminder — warns before downloading if yt-dlp/ffmpeg
-        # aren't ready
+        # aren't ready. A bordered banner (not just colored text) so it
+        # reads as a real alert, not a stray line of text.
+        self.dep_banner = tk.Frame(
+            p, bg=BG2, cursor="hand2", highlightthickness=1)
         self.lbl_dep_banner = tk.Label(
-            p, text="", bg=BG0, font=("Segoe UI", 9), justify="left",
-            anchor="w", cursor="hand2")
+            self.dep_banner, text="", bg=BG2, font=fonts.small(),
+            justify="left", anchor="w", cursor="hand2")
+        self.lbl_dep_banner.pack(
+            fill="x", padx=12, pady=9)
         self.lbl_dep_banner.bind(
             "<Configure>",
             lambda e: self.lbl_dep_banner.configure(
                 wraplength=max(1, e.width - 4)),
         )
-        self.lbl_dep_banner.bind(
-            "<Button-1>", lambda e: self._nb.select(self.tab_cfg))
+        for w_ in (self.dep_banner, self.lbl_dep_banner):
+            w_.bind("<Button-1>", lambda e: self._nb.select(self.tab_cfg))
 
         # Download / Stop buttons
         btn_frame = tk.Frame(p, bg=BG0)
-        btn_frame.grid(row=7, column=0, padx=16, pady=(10, 0), sticky="EW")
+        btn_frame.grid(row=7, column=0, padx=18, pady=(16, 0), sticky="EW")
         btn_frame.columnconfigure(0, weight=1)
 
         self.btn_dl = tk.Button(
-            btn_frame, text="Download", bg=RED, fg=FG0, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI Semibold", 11),
-            command=self._start, highlightthickness=1,
-            highlightbackground=RED, activebackground="#b91c1c",
-            activeforeground=FG0)
-        self.btn_dl.grid(row=0, column=0, sticky="EW", ipady=10)
+            btn_frame, text="Download", bg=ACCENT, fg=ACCENT_INK,
+            relief="flat", bd=0, cursor="hand2", font=fonts.button(12),
+            command=self._start, highlightthickness=0,
+            activebackground=ACCENT_HOVER, activeforeground=ACCENT_INK,
+            disabledforeground=ACCENT_INK)
+        self.btn_dl.grid(row=0, column=0, sticky="EW", ipady=12)
 
         self.btn_stop = tk.Button(
             btn_frame, text="Stop", bg=BG2, fg=FG0, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI Semibold", 11),
+            cursor="hand2", font=fonts.button(12),
             command=self._stop, state="disabled", highlightthickness=1,
             highlightbackground=BG3, activebackground=BG3,
-            activeforeground=FG0)
+            activeforeground=FG0, disabledforeground=FG2)
         self.btn_stop.grid(
-            row=0, column=1, padx=(8, 0), ipady=10, ipadx=14)
+            row=0, column=1, padx=(8, 0), ipady=12, ipadx=16)
 
-        # Log
+        # Hairline activity sweep — invisible at rest, animates while a
+        # download (or its post-processing) is running.
+        self.download_activity = widgets.ActivityBar(p, bg=BG0)
+        self.download_activity.grid(
+            row=8, column=0, padx=18, pady=(6, 0), sticky="EW")
+
+        # Log — a recessed "console" panel with its own header bar so
+        # it reads as a distinct embedded module, not just more page.
+        log_card = tk.Frame(
+            p, bg=BG1, highlightthickness=1, highlightbackground=BG3)
+        log_card.grid(row=9, column=0, padx=18, pady=(18, 14), sticky="NSEW")
+        log_card.columnconfigure(0, weight=1)
+        log_card.rowconfigure(1, weight=1)
+
+        log_head = tk.Frame(log_card, bg=BG1)
+        log_head.grid(row=0, column=0, sticky="EW", padx=12, pady=(10, 6))
+        log_head.columnconfigure(0, weight=1)
         tk.Label(
-            p, text="Output Log", bg=BG0, fg=FG1, font=("Segoe UI", 10),
-        ).grid(row=8, column=0, padx=16, pady=(12, 3), sticky="W")
-        log_f = tk.Frame(p, bg=BG0)
-        log_f.grid(row=9, column=0, padx=16, sticky="NSEW")
+            log_head, text="Output log", bg=BG1, fg=FG1,
+            font=fonts.body_bold(10),
+        ).grid(row=0, column=0, sticky="W")
+        widgets.ghost_button(log_head, "Clear", self._clear).grid(
+            row=0, column=1, ipadx=6, ipady=2)
+
+        log_f = tk.Frame(log_card, bg=BG1)
+        log_f.grid(row=1, column=0, sticky="NSEW", padx=12, pady=(0, 12))
         log_f.columnconfigure(0, weight=1)
         log_f.rowconfigure(0, weight=1)
 
         self.log = tk.Text(
-            log_f, bg="#0a0a0a", fg=LOG_GRAY, state="disabled",
-            relief="flat", bd=0, wrap="word", font=self._mono())
+            log_f, bg="#0a0a0c", fg=LOG_GRAY, state="disabled",
+            relief="flat", bd=0, wrap="word", font=self._mono(),
+            highlightthickness=1, highlightbackground=BG3, padx=10, pady=8)
         self.log.grid(row=0, column=0, sticky="NSEW")
 
         sb = tk.Scrollbar(
@@ -196,78 +209,90 @@ class DownloadTabMixin:
         ]:
             self.log.tag_configure(tag, foreground=color)
 
-        # Clear log
-        tk.Button(
-            p, text="Clear log", bg=BG1, fg=FG2, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 8), command=self._clear,
-            highlightthickness=1, highlightbackground=BG2,
-            activebackground=BG3, activeforeground=FG0,
-        ).grid(row=10, column=0, padx=16, pady=(4, 10), sticky="EW")
-
         self._fmt_changed()
         self._update_dep_banner()
 
     def _build_audio_tools_frame(self, parent):
         """Spleeter split / click track / tempo — shown only for MP3."""
         self.split_frame = tk.Frame(
-            parent, bg=BG0, highlightthickness=1, highlightbackground=BG3)
+            parent, bg=BG1, highlightthickness=1, highlightbackground=BG3)
         self.split_frame.columnconfigure(1, weight=1)
+
+        tk.Label(
+            self.split_frame, text="Audio tools", bg=BG1, fg=FG1,
+            font=fonts.small_bold(),
+        ).grid(
+            row=0, column=0, columnspan=2, padx=10, pady=(8, 2), sticky="W")
 
         self.v_split = tk.BooleanVar()
         self.chk_split = tk.Checkbutton(
             self.split_frame, text="Split audio tracks (Spleeter AI)",
-            variable=self.v_split, bg=BG0, fg=FG1, selectcolor=BG2,
-            activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10),
+            variable=self.v_split, bg=BG1, fg=FG1, selectcolor=BG2,
+            activebackground=BG1, activeforeground=FG0,
+            font=fonts.body(),
             command=lambda: self._on_audio_checkbox("spleeter", self.v_split))
         self.chk_split.grid(
-            row=0, column=0, padx=(8, 6), pady=(8, 2), sticky="W")
+            row=1, column=0, padx=(8, 6), pady=2, sticky="W")
 
-        self.cbo_stems = ttk.Combobox(
-            self.split_frame, values=list(STEM_OPTIONS), state="readonly",
-            font=("Segoe UI", 9))
+        self.cbo_stems = widgets.combobox(self.split_frame, list(STEM_OPTIONS))
         self.cbo_stems.grid(
-            row=0, column=1, padx=(0, 8), pady=(8, 2), sticky="EW", ipady=2)
-        self.cbo_stems.current(0)
+            row=1, column=1, padx=(0, 8), pady=2, sticky="EW", ipady=2)
 
         self.v_click = tk.BooleanVar()
         self.chk_click = tk.Checkbutton(
             self.split_frame, text="Generate click track (librosa)",
-            variable=self.v_click, bg=BG0, fg=FG1, selectcolor=BG2,
-            activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10),
+            variable=self.v_click, bg=BG1, fg=FG1, selectcolor=BG2,
+            activebackground=BG1, activeforeground=FG0,
+            font=fonts.body(),
             command=lambda: self._on_audio_checkbox("librosa", self.v_click))
         self.chk_click.grid(
-            row=1, column=0, columnspan=2, padx=(8, 6), pady=2, sticky="W")
+            row=2, column=0, padx=(8, 6), pady=2, sticky="W")
+
+        self.cbo_tempo_mult = widgets.combobox(
+            self.split_frame, list(TEMPO_MULTIPLIERS))
+        self.cbo_tempo_mult.grid(
+            row=2, column=1, padx=(0, 8), pady=2, sticky="EW", ipady=2)
 
         self.v_merge_click = tk.BooleanVar()
         self.chk_merge_click = tk.Checkbutton(
             self.split_frame,
             text="Merge click track into downloaded audio",
-            variable=self.v_merge_click, bg=BG0, fg=FG1, selectcolor=BG2,
-            activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10),
+            variable=self.v_merge_click, bg=BG1, fg=FG1, selectcolor=BG2,
+            activebackground=BG1, activeforeground=FG0,
+            font=fonts.body(),
             command=lambda: self._on_audio_checkbox(
                 "librosa", self.v_merge_click))
         self.chk_merge_click.grid(
-            row=2, column=0, columnspan=2, padx=(24, 6), pady=2,
+            row=3, column=0, columnspan=2, padx=(24, 6), pady=2,
+            sticky="W")
+
+        self.v_no_accents = tk.BooleanVar()
+        self.chk_no_accents = tk.Checkbutton(
+            self.split_frame,
+            text="No accents (flat click, no downbeat emphasis)",
+            variable=self.v_no_accents, bg=BG1, fg=FG1, selectcolor=BG2,
+            activebackground=BG1, activeforeground=FG0,
+            font=fonts.body(),
+        )
+        self.chk_no_accents.grid(
+            row=4, column=0, columnspan=2, padx=(24, 6), pady=2,
             sticky="W")
 
         self.v_tempo = tk.BooleanVar()
         self.chk_tempo = tk.Checkbutton(
             self.split_frame, text="Show suggested tempo (BPM)",
-            variable=self.v_tempo, bg=BG0, fg=FG1, selectcolor=BG2,
-            activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10),
+            variable=self.v_tempo, bg=BG1, fg=FG1, selectcolor=BG2,
+            activebackground=BG1, activeforeground=FG0,
+            font=fonts.body(),
             command=lambda: self._on_audio_checkbox("librosa", self.v_tempo))
         self.chk_tempo.grid(
-            row=3, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
+            row=5, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
 
         self.lbl_tempo_result = tk.Label(
-            self.split_frame, text="", bg=BG0, fg=BLUE,
-            font=("Segoe UI", 9, "bold"))
+            self.split_frame, text="", bg=BG1, fg=ACCENT,
+            font=fonts.small_bold())
         self.lbl_tempo_result.grid(
-            row=3, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
+            row=5, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
 
     # ── Audio tools setup prompt ────────────────────────────────────────
     def _on_audio_checkbox(self, kind, var):
@@ -335,13 +360,7 @@ class DownloadTabMixin:
             self._install_spleeter()
 
     def _mono(self):
-        try:
-            import tkinter.font as tkf
-            if "Cascadia Code" in tkf.families():
-                return ("Cascadia Code", 8)
-            return ("Consolas", 9)
-        except Exception:
-            return ("Consolas", 9)
+        return fonts.mono_font(9)
 
     # ── Format change ──────────────────────────────────────────────────
     def _fmt_changed(self, _=None):
@@ -353,12 +372,14 @@ class DownloadTabMixin:
 
         if self.cbo_fmt.get() == "MP3":
             self.split_frame.grid(
-                row=3, column=0, padx=16, pady=(10, 0), sticky="EW")
+                row=3, column=0, padx=18, pady=(16, 0), sticky="EW")
         else:
             self.v_split.set(False)
             self.v_click.set(False)
             self.v_merge_click.set(False)
+            self.v_no_accents.set(False)
             self.v_tempo.set(False)
+            self.cbo_tempo_mult.current(0)
             self.lbl_tempo_result.config(text="")
             self.split_frame.grid_remove()
 
@@ -403,12 +424,13 @@ class DownloadTabMixin:
             )
             color = LOG_WARN
         else:
-            self.lbl_dep_banner.grid_remove()
+            self.dep_banner.grid_remove()
             return
 
         self.lbl_dep_banner.config(text=text, fg=color)
-        self.lbl_dep_banner.grid(
-            row=6, column=0, padx=16, pady=(10, 0), sticky="EW")
+        self.dep_banner.config(highlightbackground=color, highlightcolor=color)
+        self.dep_banner.grid(
+            row=6, column=0, padx=18, pady=(16, 0), sticky="EW")
 
     # ── Log helpers ────────────────────────────────────────────────────
     def _log(self, text, tag="gray"):
@@ -467,6 +489,8 @@ class DownloadTabMixin:
         self._reset_buttons()
 
     def _reset_buttons(self):
+        widgets.stop_pulse(self.btn_dl, restore=ACCENT)
+        self.download_activity.stop()
         self.btn_dl.config(state="normal", text="Download")
         self.btn_stop.config(state="disabled")
 
@@ -534,7 +558,7 @@ class DownloadTabMixin:
         if not self.ytdlp_path or not os.path.isfile(self.ytdlp_path):
             messagebox.showerror(
                 "yt-dlp not found",
-                "yt-dlp.exe could not be located.\n\n"
+                "yt-dlp could not be located.\n\n"
                 "Go to Settings → Dependencies and use Browse or "
                 "Auto-detect.",
             )
@@ -589,6 +613,9 @@ class DownloadTabMixin:
         self._click_requested = (
             fmt == "MP3" and (self.v_click.get() or self.v_merge_click.get())
         )
+        self._no_accents = fmt == "MP3" and self.v_no_accents.get()
+        self._tempo_mult = float(
+            TEMPO_MULTIPLIERS.get(self.cbo_tempo_mult.get(), "1"))
         self._split_queue = []
         self.lbl_tempo_result.config(text="")
         needs_python = (
@@ -611,6 +638,8 @@ class DownloadTabMixin:
         self._stop_requested = False
         self.btn_dl.config(state="disabled", text="Downloading...")
         self.btn_stop.config(state="normal")
+        widgets.start_pulse(self.btn_dl, weight="primary")
+        self.download_activity.start()
         self._log(f"Starting: {url}", "blue")
         self._log(f"  Format  : {fmt} | {qual}", "gray")
         self._log(f"  Dest    : {dest}", "gray")

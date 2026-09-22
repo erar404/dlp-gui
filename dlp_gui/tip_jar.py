@@ -2,9 +2,10 @@
 import random
 import tkinter as tk
 
+from . import fonts, widgets
 from .constants import TIP_NOTES
 from .paths import BASE, QRCODE_IMAGE
-from .theme import BG0, BG2, BG3, FG0, FG1
+from .theme import BG0, FG0, FG1
 
 
 class TipJarMixin:
@@ -22,7 +23,7 @@ class TipJarMixin:
 
         tk.Label(
             win, text=random.choice(TIP_NOTES), bg=BG0, fg=FG0,
-            font=("Segoe UI", 10), wraplength=360, justify="left",
+            font=fonts.body(10), wraplength=360, justify="left",
         ).pack(padx=20, pady=(20, 12))
 
         try:
@@ -31,17 +32,13 @@ class TipJarMixin:
             tk.Label(win, image=qr_img, bg=BG0).pack(padx=20, pady=(0, 8))
             tk.Label(
                 win, text="Scan to send a tip — thank you! 💙", bg=BG0,
-                fg=FG1, font=("Segoe UI", 9),
+                fg=FG1, font=fonts.small(),
             ).pack(padx=20, pady=(0, 12))
         except Exception:
             pass
 
-        tk.Button(
-            win, text="You're welcome", bg=BG2, fg=FG0, relief="flat",
-            bd=0, cursor="hand2", font=("Segoe UI", 9),
-            command=win.destroy, highlightthickness=1,
-            highlightbackground=BG3, activebackground=BG3,
-            activeforeground=FG0,
+        widgets.secondary_button(
+            win, "You're welcome", win.destroy,
         ).pack(pady=(0, 18), ipadx=16, ipady=5)
 
         win.transient(self)

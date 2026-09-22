@@ -24,6 +24,7 @@
 - [Setup & Installation](#-setup--installation)
 - [Running the App](#-running-the-app)
 - [Building for Production](#-building-for-production)
+- [Building for macOS](#-building-for-macos)
 - [yt-dlp Path Detection](#-yt-dlp-path-detection)
 - [Config Persistence](#-config-persistence)
 - [Backend API](#-backend-api)
@@ -117,8 +118,21 @@ When **MP3** is selected as the format, three extra options appear:
 - **Split audio tracks (Spleeter AI)** — uses [Deezer's Spleeter](https://github.com/deezer/spleeter) to separate the downloaded MP3 into isolated stems after the download finishes
   - Stem presets: **2 stems** (vocals / instrumental), **4 stems** (vocals / drums / bass / other), **5 stems** (+ piano)
   - Output stems are written to a `<filename>_tracks` subfolder next to the downloaded MP3 (e.g. `Song Title_tracks\vocals.wav`)
-- **Generate click track (librosa)** — analyzes the downloaded MP3 with [librosa](https://librosa.org/)'s beat tracker and renders a metronome click at every detected beat, encoded to `<filename>_click.mp3` next to the source file (via ffmpeg)
-- **Show suggested tempo (BPM)** — runs the same beat-tracking analysis and displays the estimated tempo (e.g. `128.4 BPM`) next to the checkbox, and logs it to the Output Log
+- **Generate click track (librosa)** — analyzes the downloaded MP3 with [librosa](https://librosa.org/) and renders a metronome click track, encoded to `<filename>_click_<key>_<time signature>.mp3` next to the source file (via ffmpeg), e.g. `Song Title_click_Cmaj_4-4.mp3`
+  - The click grid is a perfectly even beat at the single detected tempo (not the raw, sometimes-irregular beat-by-beat positions librosa's beat tracker reports), so the metronome holds one steady tempo instead of skipping or drifting
+  - The downbeat of every bar is accented with a higher-pitched click than the other beats, based on the detected time signature — same as a real metronome
+  - **Merge click track into downloaded audio** — mixes the click track into the original MP3 instead of keeping it separate, written to `<filename>_<key>_<time signature>.mp3`, e.g. `Song Title_Cmaj_4-4.mp3`
+  - **Metronome speed** — `1x` (as detected), `2x` (double time), or `1/2x` (half time): a manual override for the beat tracker's own "octave errors" (locking onto half or double the true tempo). Adjusts the displayed BPM and the click track's actual speed together, so they always agree
+  - **No accents** — a flat metronome with every click identical, instead of accenting the downbeat of each bar
+- **Show suggested tempo (BPM)** — runs the same analysis and displays the estimated tempo, key, and time signature (e.g. `128.4 BPM · C Major · 4/4`) next to the checkbox, and logs them to the Output Log
+  - Key is estimated with a Krumhansl-Schmuckler key-finding algorithm (chroma pitch-class profile correlated against major/minor key templates)
+  - Time signature is a best-effort heuristic (true time-signature detection is an open research problem) that looks for the beat-count-per-bar with the clearest recurring downbeat accent, defaulting to 4/4 — by far the most common signature — when the pattern is unclear
+
+Settings → **Audio Tools** → **Separation & detection quality** exposes the real, no-training levers for better output on a given track (Spleeter and librosa aren't things this app retrains — Spleeter is a fixed pretrained model, and librosa's beat/key detection is signal processing, not a learned model — but both take tunable parameters):
+
+- **High-quality separation (MWF filter)** — enables Spleeter's own multichannel Wiener filter post-processing pass (`spleeter separate --mwf`) for cleaner stem separation; noticeably slower
+- **Tempo search range (BPM)** — biases the beat tracker's search toward this range and octave-folds the result into it afterward (doubling/halving as needed) — the automatic counterpart to the manual **Metronome speed** override above, useful when a whole session's tracks share a similar tempo range
+- **Beat tracking sensitivity** — librosa's `tightness` parameter: higher holds a stricter, more regular beat grid; lower follows a track's actual tempo fluctuations more loosely (useful for live/rubato recordings)
 
 **No Python installation required on the target machine.** Settings → **Audio Tools (Spleeter · Click Track · Tempo)** → **⚡ Auto-Setup Audio Tools** downloads a private, portable Python 3.10 runtime (the official embeddable build from python.org) into `python-embed/` next to the app, bootstraps `pip` inside it, and installs Spleeter + librosa there — completely isolated from any Python already on the system. This runtime is never shared with or visible to other applications.
 
@@ -189,7 +203,7 @@ The app is a fixed-size (660 × 700) dark window with two tabs.
 │  Retries: [10▲]  Proxy: [                               ]  │
 │                                                             │
 │  Playlist Handling                                          │
-│  ◉ Auto   ○ Single video only   ○ Always full playlist     │
+│  ○ Auto   ◉ Single video only   ○ Always full playlist     │
 │                                                             │
 │  Output Filename Template                                   │
 │  [ %(title)s.%(ext)s                                      ] │
@@ -266,10 +280,10 @@ version — this was a pure reorganization, not a behavior change.
 
 | Requirement | Notes |
 |---|---|
-| Windows 10 / 11 | Required for WinForms launcher; tkinter build runs anywhere Python does |
-| Python 3.8 + | Only needed to run `dlp-ui.py` directly or to build the exe |
-| yt-dlp | Download from [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases) |
-| ffmpeg (optional) | Required for remux, re-encode, thumbnail embedding, and SponsorBlock |
+| Windows 10 / 11, or macOS | The WinForms launcher (`dlp-ui.ps1`) is Windows-only; the Python/tkinter app runs on both |
+| Python 3.8 + | Only needed to run `dlp-ui.py` directly or to build the app |
+| yt-dlp | Download from [yt-dlp releases](https://github.com/yt-dlp/yt-dlp/releases), or use Settings → Get yt-dlp |
+| ffmpeg (optional) | Required for remux, re-encode, thumbnail embedding, and SponsorBlock. On macOS, get it via [Homebrew](https://brew.sh) (`brew install ffmpeg`) or Settings → Get ffmpeg |
 
 ### Clone / Download
 
@@ -363,6 +377,48 @@ PyInstaller options baked into the spec:
 | `console` | false | Suppresses black terminal window |
 
 > 📌 `dlp-ui-config.json` is created at runtime next to the `.exe` — it is not bundled into the binary.
+
+---
+
+## 🍎 Building for macOS
+
+`build.sh` is the macOS equivalent of `build.bat`. It must be run **on a Mac** — PyInstaller builds for the platform it runs on, it can't cross-compile a `.app` from Windows or Linux.
+
+```bash
+chmod +x build.sh   # first time only
+./build.sh
+```
+
+What it does:
+
+1. Checks for `python3`; installs `pyinstaller` and `pillow` (for icon conversion) via `pip` if missing
+2. Runs `download_deps.py`, which downloads the official [`yt-dlp_macos`](https://github.com/yt-dlp/yt-dlp/releases) binary into `deps/yt-dlp`
+3. Builds `icon.icns` from `favicon.ico` (via Pillow + macOS's `iconutil`) if it doesn't already exist
+4. Runs `python3 -m PyInstaller dlp-ui-macos.spec`
+5. Zips the result as `dist/dlp-ui-macos-<arch>.zip` (`arm64` or `x86_64`, matching the build machine)
+
+Output:
+
+```
+dist/dlp-ui.app                       ← the app bundle
+dist/dlp-ui-macos-arm64.zip           ← zipped, ready to attach to a GitHub release
+```
+
+### Why ffmpeg isn't bundled on macOS
+
+The Windows build embeds a static `ffmpeg.exe`/`ffprobe.exe` straight into the `.exe` — fully portable, no extra step for the end user. macOS doesn't have an equally trustworthy static-binary source: the usual "static ffmpeg for Mac" mirrors are third-party binaries downloaded and executed sight-unseen, and even where a binary is trustworthy, a `.dylib`-linked Homebrew build can't just be copied into the bundle without carrying its shared-library dependencies along with it.
+
+Instead, the app finds or installs ffmpeg via **Homebrew** at runtime (Settings → Dependencies → Get ffmpeg, or Auto-detect if you already have it). Most Mac users doing this kind of work already have Homebrew; if not, install it from [brew.sh](https://brew.sh) first.
+
+### Audio Tools (Spleeter) on macOS
+
+Settings → Audio Tools → **Auto-Setup Audio Tools** downloads a private, portable Python 3.10 runtime from [python-build-standalone](https://github.com/astral-sh/python-build-standalone) (the macOS analogue of the Windows embeddable-Python zip) and installs Spleeter + librosa into it — same one-click flow as Windows.
+
+> ⚠️ **Apple Silicon (M1/M2/M3/…) caveat:** Spleeter pins an older TensorFlow version for compatibility with `numpy<2`. Generic `tensorflow` PyPI wheels only gained native Apple Silicon (arm64) support from TensorFlow 2.13 onward, so `pip install` may fail to find a compatible wheel for the pinned version on arm64 Macs. This is an upstream packaging gap, not something this app's build tooling can paper over — if it happens, the pip output in the log will explain why. Tempo detection and click-track generation (librosa/soundfile) don't depend on TensorFlow and are unaffected.
+
+### Self-updating a macOS build
+
+Settings → App Update checks the GitHub releases API and looks for an asset named `dlp-ui-macos-<arch>.zip` (falling back to `dlp-ui-macos.zip`) — exactly what `build.sh` produces. If you're cutting releases, attach that zip (for each architecture you build) alongside the Windows `dlp-ui.exe`.
 
 ---
 

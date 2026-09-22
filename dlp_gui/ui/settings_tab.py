@@ -3,30 +3,55 @@ audio tools), download post-processing options, and app self-update.
 """
 import json
 import os
+import platform
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import tkinter as tk
 import urllib.request
 import zipfile
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 
+from .. import fonts, widgets
 from ..constants import APP_RELEASES_API, VERSION
 from ..dependencies import (
-    EMBED_PYTHON_URL, FFMPEG_RELEASE_URL, GET_PIP_URL, YTDLP_RELEASE_URL,
-    check_librosa_installed, check_spleeter_installed, find_ffmpeg,
-    find_python, find_ytdlp,
+    EMBED_PYTHON_URL, EXE, FFMPEG_RELEASE_URL, GET_PIP_URL, IS_MACOS,
+    IS_WINDOWS, YTDLP_RELEASE_URL, check_librosa_installed,
+    check_spleeter_installed, find_ffmpeg, find_python, find_ytdlp,
 )
 from ..paths import BASE, load_config, parse_version, save_config
 from ..theme import (
-    BG0, BG2, BG3, BLUE, FG0, FG1, FG2, LOG_OK, LOG_RED, LOG_WARN,
+    ACCENT, BG0, BG1, BG2, BG3, BLUE, FG0, FG1, FG2, LOG_OK, LOG_RED,
+    LOG_WARN,
+)
+
+# macOS/Linux binaries have no extension, so an "*.exe" file-dialog
+# filter would hide every real match — only apply it on Windows.
+_EXE_FILETYPES = (
+    [("Executable", "*.exe"), ("All files", "*.*")] if IS_WINDOWS
+    else [("All files", "*")]
 )
 
 
 def _no_window_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    return subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+
+
+def _update_asset_names():
+    """GitHub release asset name(s) to look for when self-updating, in
+    priority order — an arch-specific macOS build first, falling back
+    to a universal one."""
+    if IS_MACOS:
+        arch = (
+            "arm64" if platform.machine() in ("arm64", "aarch64")
+            else "x86_64"
+        )
+        return [f"dlp-ui-macos-{arch}.zip", "dlp-ui-macos.zip"]
+    return ["dlp-ui.exe"]
 
 
 class SettingsTabMixin:
@@ -43,7 +68,7 @@ class SettingsTabMixin:
             p, bg=BG0, highlightthickness=0)
         vsb = tk.Scrollbar(
             p, orient="vertical", command=canvas.yview, bg=BG2,
-            troughcolor=BG3, activebackground=BG3)
+            troughcolor=BG1, activebackground=BG3)
         canvas.configure(yscrollcommand=vsb.set)
         vsb.grid(row=0, column=1, sticky="NS")
         canvas.grid(row=0, column=0, sticky="NSEW")
@@ -57,70 +82,100 @@ class SettingsTabMixin:
             "<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
         inner.columnconfigure(0, weight=1)
 
-        widgets = _SettingsWidgetFactory(inner)
+        widgets.category_header(inner, "Setup")
+        self._build_dependencies_group(inner)
+        self._build_audio_tools_group(inner)
 
-        self._build_dependencies_group(widgets)
-        self._build_audio_tools_group(widgets)
-        self._build_post_processing_group(widgets)
-        self._build_subtitles_group(widgets)
-        self._build_network_group(widgets)
-        self._build_playlist_group(widgets)
-        self._build_output_template_group(widgets)
-        self._build_extra_args_group(widgets)
-        self._build_app_update_group(widgets, inner)
+        widgets.category_header(inner, "Download behavior")
+        self._build_post_processing_group(inner)
+        self._build_subtitles_group(inner)
+        self._build_playlist_group(inner)
+        self._build_output_template_group(inner)
+
+        widgets.category_header(inner, "Advanced & network")
+        self._build_network_group(inner)
+        self._build_extra_args_group(inner)
+
+        widgets.category_header(inner, "Application")
+        self._build_app_update_group(inner)
+
+        tk.Frame(inner, bg=BG0, height=12).pack()
 
     # ── Dependencies group ─────────────────────────────────────────────
-    def _build_dependencies_group(self, w):
-        g = w.grp("Dependencies")
-        g.columnconfigure(1, weight=1)
+    def _build_dependencies_group(self, parent):
+        card = widgets.Card(
+            parent, "Dependencies",
+            "yt-dlp fetches video and audio; ffmpeg merges formats, "
+            "converts audio, and embeds thumbnails. Most downloads "
+            "need both.")
+        g = card.body
+        g.columnconfigure(0, weight=1)
 
+        # ── yt-dlp ──────────────────────────────────────────────────
         tk.Label(
-            g, text="yt-dlp:", bg=BG0, fg=FG1, font=("Segoe UI", 9, "bold"),
-        ).grid(row=0, column=0, padx=(8, 4), pady=(10, 3), sticky="W")
-        self.txt_ytdlp = w.ent(g, self.ytdlp_path)
-        self.txt_ytdlp.grid(
-            row=0, column=1, padx=4, pady=(10, 3), sticky="EW", ipady=3)
-        w.sbtn(g, "Browse", self._browse_ytdlp).grid(
-            row=0, column=2, padx=4, pady=(10, 3), ipady=3)
-        w.sbtn(g, "Auto-detect", self._autodetect_ytdlp).grid(
-            row=0, column=3, padx=4, pady=(10, 3), ipady=3)
-        self.btn_get_ytdlp = w.sbtn(
-            g, "↓ Get yt-dlp", self._download_ytdlp)
-        self.btn_get_ytdlp.grid(
-            row=0, column=4, padx=(4, 8), pady=(10, 3), ipady=3)
+            g, text="yt-dlp", bg=BG2, fg=FG0, font=fonts.body_bold(10),
+        ).grid(row=0, column=0, sticky="W", pady=(0, 4))
+        self.txt_ytdlp = widgets.entry(g, self.ytdlp_path)
+        self.txt_ytdlp.grid(row=1, column=0, sticky="EW", ipady=6)
 
-        self.lbl_ytdlp_status = w.slbl(g)
-        self.lbl_ytdlp_status.grid(
-            row=1, column=0, columnspan=5, padx=8, pady=(0, 4), sticky="EW")
+        row1 = tk.Frame(g, bg=BG2)
+        row1.grid(row=2, column=0, sticky="EW", pady=(6, 0))
+        row1.columnconfigure(0, weight=1)
+        self.lbl_ytdlp_status = widgets.status_label(row1)
+        self.lbl_ytdlp_status.grid(row=0, column=0, sticky="EW")
+        cluster1 = tk.Frame(row1, bg=BG2)
+        cluster1.grid(row=0, column=1, sticky="E")
+        widgets.secondary_button(
+            cluster1, "Browse", self._browse_ytdlp,
+        ).pack(side="left", ipady=4)
+        widgets.secondary_button(
+            cluster1, "Auto-detect", self._autodetect_ytdlp,
+        ).pack(side="left", padx=(6, 0), ipady=4)
+        self.btn_get_ytdlp = widgets.secondary_button(
+            cluster1, "↓ Get yt-dlp", self._download_ytdlp)
+        self.btn_get_ytdlp.pack(side="left", padx=(6, 0), ipady=4)
+        self.ytdlp_activity = widgets.ActivityBar(row1, bg=BG2)
+        self.ytdlp_activity.grid(
+            row=1, column=0, columnspan=2, sticky="EW", pady=(6, 0))
 
+        tk.Frame(g, bg=BG3, height=1).grid(
+            row=3, column=0, sticky="EW", pady=14)
+
+        # ── ffmpeg ──────────────────────────────────────────────────
         tk.Label(
-            g, text="ffmpeg:", bg=BG0, fg=FG1, font=("Segoe UI", 9, "bold"),
-        ).grid(row=2, column=0, padx=(8, 4), pady=(4, 3), sticky="W")
-        self.txt_ffmpeg = w.ent(g, self.ffmpeg_path)
-        self.txt_ffmpeg.grid(
-            row=2, column=1, padx=4, pady=(4, 3), sticky="EW", ipady=3)
-        w.sbtn(g, "Browse", self._browse_ffmpeg).grid(
-            row=2, column=2, padx=4, pady=(4, 3), ipady=3)
-        w.sbtn(g, "Auto-detect", self._autodetect_ffmpeg).grid(
-            row=2, column=3, padx=4, pady=(4, 3), ipady=3)
-        self.btn_get_ffmpeg = w.sbtn(
-            g, "↓ Get ffmpeg", self._download_ffmpeg)
-        self.btn_get_ffmpeg.grid(
-            row=2, column=4, padx=(4, 8), pady=(4, 3), ipady=3)
+            g, text="ffmpeg", bg=BG2, fg=FG0, font=fonts.body_bold(10),
+        ).grid(row=4, column=0, sticky="W", pady=(0, 4))
+        self.txt_ffmpeg = widgets.entry(g, self.ffmpeg_path)
+        self.txt_ffmpeg.grid(row=5, column=0, sticky="EW", ipady=6)
 
-        self.lbl_ffmpeg_status = w.slbl(g)
-        self.lbl_ffmpeg_status.grid(
-            row=3, column=0, columnspan=5, padx=8, pady=(0, 4), sticky="EW")
+        row2 = tk.Frame(g, bg=BG2)
+        row2.grid(row=6, column=0, sticky="EW", pady=(6, 0))
+        row2.columnconfigure(0, weight=1)
+        self.lbl_ffmpeg_status = widgets.status_label(row2)
+        self.lbl_ffmpeg_status.grid(row=0, column=0, sticky="EW")
+        cluster2 = tk.Frame(row2, bg=BG2)
+        cluster2.grid(row=0, column=1, sticky="E")
+        widgets.secondary_button(
+            cluster2, "Browse", self._browse_ffmpeg,
+        ).pack(side="left", ipady=4)
+        widgets.secondary_button(
+            cluster2, "Auto-detect", self._autodetect_ffmpeg,
+        ).pack(side="left", padx=(6, 0), ipady=4)
+        self.btn_get_ffmpeg = widgets.secondary_button(
+            cluster2, "↓ Get ffmpeg", self._download_ffmpeg)
+        self.btn_get_ffmpeg.pack(side="left", padx=(6, 0), ipady=4)
+        self.ffmpeg_activity = widgets.ActivityBar(row2, bg=BG2)
+        self.ffmpeg_activity.grid(
+            row=1, column=0, columnspan=2, sticky="EW", pady=(6, 0))
 
-        self.btn_quick_setup = tk.Button(
-            g, text="⚡  Quick Setup  —  download yt-dlp + ffmpeg",
-            bg=BG2, fg=BLUE, relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 9), command=self._quick_setup,
-            highlightthickness=1, highlightbackground=BLUE,
-            activebackground=BG3, activeforeground=FG0)
+        self.btn_quick_setup = widgets.primary_button(
+            g, "⚡  Quick Setup — download yt-dlp + ffmpeg",
+            self._quick_setup)
         self.btn_quick_setup.grid(
-            row=4, column=0, columnspan=5, padx=8, pady=(2, 8),
-            sticky="EW", ipady=3)
+            row=7, column=0, sticky="EW", pady=(16, 0), ipady=8)
+        self.quick_setup_activity = widgets.ActivityBar(g, bg=BG2)
+        self.quick_setup_activity.grid(
+            row=8, column=0, sticky="EW", pady=(6, 0))
 
         self.txt_ytdlp.bind("<FocusOut>", self._on_ytdlp_entry_change)
         self.txt_ytdlp.bind("<Return>", self._on_ytdlp_entry_change)
@@ -130,165 +185,196 @@ class SettingsTabMixin:
         self._refresh_ffmpeg_status()
 
     # ── Audio Tools group ──────────────────────────────────────────────
-    def _build_audio_tools_group(self, w):
-        g = w.grp("Audio Tools (Spleeter · Click Track · Tempo)")
+    def _build_audio_tools_group(self, parent):
+        card = widgets.Card(
+            parent, "Audio tools",
+            "Split an MP3 into isolated stems (vocals, drums, bass...) "
+            "with Deezer's Spleeter model, or detect tempo and "
+            "generate a click track with librosa.")
+        g = card.body
         g.columnconfigure(0, weight=1)
 
-        tk.Label(
-            g, text=(
-                "MP3 downloads can optionally be split into isolated "
-                "stems (vocals, drums, bass, etc.) using Deezer's "
-                "Spleeter AI model, and analyzed with librosa to show "
-                "the suggested tempo (BPM) and/or generate a click "
-                "track at the detected beat."
-            ), bg=BG0, fg=FG2, font=("Segoe UI", 8), justify="left",
-            wraplength=560,
-        ).grid(row=0, column=0, padx=8, pady=(10, 6), sticky="W")
+        self.btn_setup_spleeter = widgets.primary_button(
+            g, "⚡  Auto-Setup Audio Tools — no Python install needed",
+            self._setup_embedded_python)
+        self.btn_setup_spleeter.grid(row=0, column=0, sticky="EW", ipady=8)
+        self.spleeter_setup_activity = widgets.ActivityBar(g, bg=BG2)
+        self.spleeter_setup_activity.grid(
+            row=1, column=0, sticky="EW", pady=(6, 0))
 
-        self.btn_setup_spleeter = tk.Button(
-            g, text="⚡  Auto-Setup Audio Tools  —  no Python install "
-                    "needed",
-            bg=BG2, fg=BLUE, relief="flat", bd=0, cursor="hand2",
-            font=("Segoe UI", 9), command=self._setup_embedded_python,
-            highlightthickness=1, highlightbackground=BLUE,
-            activebackground=BG3, activeforeground=FG0)
-        self.btn_setup_spleeter.grid(
-            row=1, column=0, padx=8, pady=(0, 4), sticky="EW", ipady=3)
-
-        self.lbl_spleeter_status = w.slbl(g)
+        self.lbl_spleeter_status = widgets.status_label(g)
         self.lbl_spleeter_status.grid(
-            row=2, column=0, padx=8, pady=(0, 8), sticky="EW")
+            row=2, column=0, sticky="EW", pady=(8, 0))
 
-        adv = tk.LabelFrame(
-            g, text="Advanced — use an existing Python interpreter "
-                    "instead",
-            bg=BG0, fg=FG2, bd=1, relief="groove", font=("Segoe UI", 8))
-        adv.grid(row=3, column=0, padx=8, pady=(0, 10), sticky="EW")
+        # ── Quality & detection tuning ───────────────────────────────
+        # Spleeter and librosa are fixed, pretrained/parameter-based
+        # tools, not something this app retrains — but both expose
+        # real levers for better output on a given track: Spleeter's
+        # own post-separation filter, and librosa's tempo search range
+        # + beat-tracking sensitivity.
+        quality = tk.Frame(
+            g, bg=BG1, highlightthickness=1, highlightbackground=BG3)
+        quality.grid(row=3, column=0, sticky="EW", pady=(14, 0))
+        quality.columnconfigure(0, weight=1)
+
+        tk.Label(
+            quality, text="Separation & detection quality",
+            bg=BG1, fg=FG1, font=fonts.small_bold(),
+        ).grid(row=0, column=0, sticky="W", padx=12, pady=(10, 6))
+
+        cb, self.v_mwf = widgets.checkbox(
+            quality,
+            "High-quality separation (MWF filter) — slower, cleaner "
+            "stems", bg=BG1)
+        cb.grid(row=1, column=0, sticky="W", padx=12, pady=(0, 10))
+
+        trow = tk.Frame(quality, bg=BG1)
+        trow.grid(row=2, column=0, sticky="EW", padx=12)
+        widgets.field_label(
+            trow, "Tempo search range (BPM) — corrects octave errors "
+                  "(half/double the true tempo)", bg=BG1,
+        ).pack(anchor="w")
+        range_row = tk.Frame(trow, bg=BG1)
+        range_row.pack(anchor="w", pady=(3, 0))
+        self.spn_tempo_min = widgets.spinbox(range_row, 20, 300, 60, width=5)
+        self.spn_tempo_min.pack(side="left", ipady=4)
+        widgets.field_label(range_row, "to", bg=BG1).pack(
+            side="left", padx=8)
+        self.spn_tempo_max = widgets.spinbox(range_row, 20, 300, 200, width=5)
+        self.spn_tempo_max.pack(side="left", ipady=4)
+
+        srow = tk.Frame(quality, bg=BG1)
+        srow.grid(row=3, column=0, sticky="EW", padx=12, pady=(10, 12))
+        widgets.field_label(
+            srow, "Beat tracking sensitivity — lower follows tempo "
+                  "changes more loosely, higher holds a stricter grid",
+            bg=BG1,
+        ).grid(row=0, column=0, sticky="W")
+        self.spn_sensitivity = widgets.spinbox(
+            srow, 10, 400, 100, width=6)
+        self.spn_sensitivity.grid(
+            row=1, column=0, sticky="W", ipady=4, pady=(3, 0))
+
+        adv = tk.Frame(
+            g, bg=BG1, highlightthickness=1, highlightbackground=BG3)
+        adv.grid(row=4, column=0, sticky="EW", pady=(14, 0))
         adv.columnconfigure(0, weight=1)
 
-        row = tk.Frame(adv, bg=BG0)
-        row.grid(row=0, column=0, padx=6, pady=6, sticky="EW")
-        row.columnconfigure(0, weight=1)
-        self.txt_python = w.ent(row, self.python_path)
-        self.txt_python.grid(row=0, column=0, sticky="EW", ipady=3)
-        w.sbtn(row, "Browse", self._browse_python).grid(
-            row=0, column=1, padx=(4, 0), ipady=3)
-        w.sbtn(row, "Auto-detect", self._autodetect_python).grid(
-            row=0, column=2, padx=(4, 0), ipady=3)
-        self.btn_install_spleeter = w.sbtn(
-            row, "↓ Install Spleeter", self._install_spleeter)
-        self.btn_install_spleeter.grid(row=0, column=3, padx=(4, 0), ipady=3)
+        tk.Label(
+            adv, text="Advanced: use an existing Python interpreter",
+            bg=BG1, fg=FG1, font=fonts.small_bold(),
+        ).grid(row=0, column=0, sticky="W", padx=12, pady=(10, 6))
+
+        prow = tk.Frame(adv, bg=BG1)
+        prow.grid(row=1, column=0, sticky="EW", padx=12)
+        prow.columnconfigure(0, weight=1)
+        self.txt_python = tk.Entry(
+            prow, bg=BG2, fg=FG0, insertbackground=FG0, relief="flat",
+            bd=0, highlightthickness=1, highlightbackground=BG3,
+            highlightcolor=ACCENT, font=fonts.body())
+        if self.python_path:
+            self.txt_python.insert(0, self.python_path)
+        self.txt_python.grid(row=0, column=0, sticky="EW", ipady=6)
+
+        pbtns = tk.Frame(adv, bg=BG1)
+        pbtns.grid(row=2, column=0, sticky="E", padx=12, pady=(8, 0))
+        widgets.secondary_button(
+            pbtns, "Browse", self._browse_python,
+        ).pack(side="left", ipady=4)
+        widgets.secondary_button(
+            pbtns, "Auto-detect", self._autodetect_python,
+        ).pack(side="left", padx=(6, 0), ipady=4)
+        self.btn_install_spleeter = widgets.secondary_button(
+            pbtns, "↓ Install Spleeter", self._install_spleeter)
+        self.btn_install_spleeter.pack(side="left", padx=(6, 0), ipady=4)
+
+        self.install_spleeter_activity = widgets.ActivityBar(adv, bg=BG1)
+        self.install_spleeter_activity.grid(
+            row=3, column=0, sticky="EW", padx=12, pady=(6, 0))
 
         tk.Label(
             adv, text=(
                 "Must be Python 3.6–3.10 — newer versions can't build "
                 "Spleeter's dependencies."
-            ), bg=BG0, fg=FG2, font=("Segoe UI", 8), justify="left",
+            ), bg=BG1, fg=FG2, font=fonts.small(), justify="left",
             wraplength=540,
-        ).grid(row=1, column=0, padx=6, pady=(0, 6), sticky="W")
+        ).grid(row=4, column=0, sticky="W", padx=12, pady=(8, 10))
 
         self.txt_python.bind("<FocusOut>", self._on_python_entry_change)
         self.txt_python.bind("<Return>", self._on_python_entry_change)
         self._refresh_spleeter_status()
 
     # ── Post-Processing group ───────────────────────────────────────────
-    def _build_post_processing_group(self, w):
-        g = w.grp("Post-Processing")
-        g.columnconfigure(0, weight=1)
-        g.columnconfigure(1, weight=1)
+    def _build_post_processing_group(self, parent):
+        card = widgets.Card(
+            parent, "Post-processing", "Runs after each download finishes.")
+        g = card.body
+        g.columnconfigure(0, weight=1, uniform="pp")
+        g.columnconfigure(1, weight=1, uniform="pp")
 
-        cb, self.v_thumb = w.chk(g, "Embed thumbnail as cover art")
-        cb.grid(row=0, column=0, padx=8, pady=(8, 2), sticky="W")
-        cb, self.v_meta = w.chk(g, "Embed metadata (title, artist...)")
-        cb.grid(row=1, column=0, padx=8, pady=2, sticky="W")
-        cb, self.v_chapters = w.chk(g, "Embed chapter markers")
-        cb.grid(row=2, column=0, padx=8, pady=(2, 8), sticky="W")
+        left = tk.Frame(g, bg=BG2)
+        left.grid(row=0, column=0, sticky="NW", padx=(0, 10))
+        cb, self.v_thumb = widgets.checkbox(left, "Embed thumbnail as cover art")
+        cb.pack(anchor="w", pady=(0, 6))
+        cb, self.v_meta = widgets.checkbox(left, "Embed metadata (title, artist...)")
+        cb.pack(anchor="w", pady=(0, 6))
+        cb, self.v_chapters = widgets.checkbox(left, "Embed chapter markers")
+        cb.pack(anchor="w")
 
-        cb, self.v_sponsor = w.chk(
-            g, "SponsorBlock: remove sponsored segments")
-        cb.grid(row=0, column=1, padx=8, pady=(8, 2), sticky="W")
+        right = tk.Frame(g, bg=BG2)
+        right.grid(row=0, column=1, sticky="NEW")
+        right.columnconfigure(0, weight=1)
+        cb, self.v_sponsor = widgets.checkbox(
+            right, "Remove sponsored segments (SponsorBlock)")
+        cb.grid(row=0, column=0, sticky="W", pady=(0, 10))
 
-        rr = tk.Frame(g, bg=BG0)
-        rr.grid(row=1, column=1, rowspan=2, padx=8, pady=(2, 8), sticky="EW")
-        rr.columnconfigure(1, weight=1)
-        w.lbl10(rr, "Remux to:").grid(
-            row=0, column=0, padx=(0, 6), pady=3, sticky="W")
-        self.cbo_remux = w.cbo(
-            rr, ["None", "mp4", "mkv", "mov", "webm", "avi", "flv"])
-        self.cbo_remux.grid(row=0, column=1, sticky="EW", ipady=2)
-        w.lbl10(rr, "Re-encode to:").grid(
-            row=1, column=0, padx=(0, 6), pady=3, sticky="W")
-        self.cbo_recode = w.cbo(
-            rr, ["None", "mp4", "mkv", "mov", "webm", "mp3", "m4a", "wav"])
-        self.cbo_recode.grid(row=1, column=1, sticky="EW", ipady=2)
+        widgets.field_label(right, "Remux to").grid(
+            row=1, column=0, sticky="W", pady=(0, 3))
+        self.cbo_remux = widgets.combobox(
+            right, ["None", "mp4", "mkv", "mov", "webm", "avi", "flv"])
+        self.cbo_remux.grid(row=2, column=0, sticky="EW", ipady=3)
+
+        widgets.field_label(right, "Re-encode to").grid(
+            row=3, column=0, sticky="W", pady=(10, 3))
+        self.cbo_recode = widgets.combobox(
+            right, ["None", "mp4", "mkv", "mov", "webm", "mp3", "m4a", "wav"])
+        self.cbo_recode.grid(row=4, column=0, sticky="EW", ipady=3)
 
     # ── Subtitles group ──────────────────────────────────────────────────
-    def _build_subtitles_group(self, w):
-        g = w.grp("Subtitles")
-        g.columnconfigure(0, weight=1)
-        g.columnconfigure(1, weight=1)
+    def _build_subtitles_group(self, parent):
+        card = widgets.Card(
+            parent, "Subtitles", "Grabs subtitle tracks alongside the video.")
+        g = card.body
+        g.columnconfigure(0, weight=1, uniform="sub")
+        g.columnconfigure(1, weight=1, uniform="sub")
 
-        cb, self.v_subs = w.chk(g, "Download subtitles")
-        cb.grid(row=0, column=0, padx=8, pady=(8, 2), sticky="W")
-        cb, self.v_auto_subs = w.chk(g, "Include auto-generated subtitles")
-        cb.grid(row=1, column=0, padx=8, pady=(2, 8), sticky="W")
+        left = tk.Frame(g, bg=BG2)
+        left.grid(row=0, column=0, sticky="NW", padx=(0, 10))
+        cb, self.v_subs = widgets.checkbox(left, "Download subtitles")
+        cb.pack(anchor="w", pady=(0, 6))
+        cb, self.v_auto_subs = widgets.checkbox(
+            left, "Include auto-generated subtitles")
+        cb.pack(anchor="w")
 
-        sr = tk.Frame(g, bg=BG0)
-        sr.grid(row=0, column=1, rowspan=2, padx=8, pady=8, sticky="EW")
-        sr.columnconfigure(0, weight=1)
-        w.lbl10(sr, "Languages (comma-separated, e.g. en,ja):").grid(
+        right = tk.Frame(g, bg=BG2)
+        right.grid(row=0, column=1, sticky="NEW")
+        right.columnconfigure(0, weight=1)
+        widgets.field_label(right, "Languages (comma-separated, e.g. en,ja)").grid(
             row=0, column=0, sticky="W", pady=(0, 3))
-        self.txt_sub_langs = w.ent(sr, "en")
-        self.txt_sub_langs.grid(row=1, column=0, sticky="EW", ipady=3)
-
-    # ── Network group ────────────────────────────────────────────────────
-    def _build_network_group(self, w):
-        g = w.grp("Network")
-        g.columnconfigure(0, weight=1)
-
-        top = tk.Frame(g, bg=BG0)
-        top.grid(row=0, column=0, padx=8, pady=(8, 4), sticky="EW")
-        top.columnconfigure(0, weight=1)
-        top.columnconfigure(2, weight=1)
-
-        w.lbl10(top, "Rate limit (e.g. 5M, 500K):").grid(
-            row=0, column=0, sticky="W")
-        self.txt_rate = w.ent(top)
-        self.txt_rate.grid(row=1, column=0, sticky="EW", ipady=3)
-
-        w.lbl10(top, "Concurrent frags:").grid(
-            row=0, column=1, padx=(12, 4), sticky="W")
-        self.spn_frags = w.spn(top, 1, 32, 1)
-        self.spn_frags.grid(row=1, column=1, padx=(12, 4), ipady=3)
-
-        w.lbl10(top, "Cookies from browser:").grid(
-            row=0, column=2, sticky="W")
-        self.cbo_cookies = w.cbo(top, [
-            "None", "chrome", "firefox", "edge", "brave", "opera",
-            "safari", "vivaldi", "chromium",
-        ])
-        self.cbo_cookies.grid(row=1, column=2, sticky="EW", ipady=2)
-
-        w.lbl10(top, "Retries:").grid(row=0, column=3, padx=(12, 0), sticky="W")
-        self.spn_retries = w.spn(top, 1, 50, 10)
-        self.spn_retries.grid(row=1, column=3, padx=(12, 0), ipady=3)
-
-        bot = tk.Frame(g, bg=BG0)
-        bot.grid(row=1, column=0, padx=8, pady=(0, 8), sticky="EW")
-        bot.columnconfigure(0, weight=1)
-        w.lbl10(bot, "Proxy (e.g. socks5://127.0.0.1:1080):").grid(
-            row=0, column=0, sticky="W", pady=(0, 3))
-        self.txt_proxy = w.ent(bot)
-        self.txt_proxy.grid(row=1, column=0, sticky="EW", ipady=3)
+        self.txt_sub_langs = widgets.entry(right, "en")
+        self.txt_sub_langs.grid(row=1, column=0, sticky="EW", ipady=6)
 
     # ── Playlist group ───────────────────────────────────────────────────
-    def _build_playlist_group(self, w):
-        g = w.grp("Playlist Handling")
+    def _build_playlist_group(self, parent):
+        card = widgets.Card(
+            parent, "Playlist handling",
+            "What happens when a link points at more than one video.")
+        g = card.body
         g.columnconfigure(0, weight=1)
 
-        self.v_playlist = tk.StringVar(value="auto")
-        pl = tk.Frame(g, bg=BG0)
-        pl.grid(row=0, column=0, padx=8, pady=8, sticky="W")
+        self.v_playlist = tk.StringVar(value="single")
+        pl = tk.Frame(g, bg=BG2)
+        pl.grid(row=0, column=0, sticky="W")
         for text, val in [
             ("Auto (let yt-dlp decide)", "auto"),
             ("Single video only", "single"),
@@ -296,55 +382,103 @@ class SettingsTabMixin:
         ]:
             tk.Radiobutton(
                 pl, text=text, variable=self.v_playlist, value=val,
-                bg=BG0, fg=FG1, selectcolor=BG2,
-                activebackground=BG0, activeforeground=FG0,
-                font=("Segoe UI", 10),
+                bg=BG2, fg=FG1, selectcolor=BG1,
+                activebackground=BG2, activeforeground=FG0,
+                font=fonts.body(),
             ).pack(side="left", padx=(0, 16))
 
     # ── Output template group ───────────────────────────────────────────
-    def _build_output_template_group(self, w):
-        g = w.grp("Output Filename Template")
+    def _build_output_template_group(self, parent):
+        card = widgets.Card(
+            parent, "Output filename", "How downloaded files get named.")
+        g = card.body
         g.columnconfigure(0, weight=1)
 
-        w.lbl10(g, "Template (%(title)s.%(ext)s = default):").grid(
-            row=0, column=0, padx=8, pady=(8, 3), sticky="W")
-        self.txt_tmpl = w.ent(g, "%(title)s.%(ext)s")
-        self.txt_tmpl.grid(
-            row=1, column=0, padx=8, pady=(0, 8), sticky="EW", ipady=3)
+        widgets.field_label(g, "Template (%(title)s.%(ext)s = default)").grid(
+            row=0, column=0, sticky="W", pady=(0, 3))
+        self.txt_tmpl = widgets.entry(g, "%(title)s.%(ext)s")
+        self.txt_tmpl.grid(row=1, column=0, sticky="EW", ipady=6)
+
+    # ── Network group ────────────────────────────────────────────────────
+    def _build_network_group(self, parent):
+        card = widgets.Card(
+            parent, "Network",
+            "Rate limits, retries, proxying, and browser cookies for "
+            "gated content.")
+        g = card.body
+        g.columnconfigure(0, weight=1)
+
+        top = tk.Frame(g, bg=BG2)
+        top.grid(row=0, column=0, sticky="EW")
+        top.columnconfigure(0, weight=2, uniform="net")
+        top.columnconfigure(1, weight=1, uniform="net")
+        top.columnconfigure(2, weight=2, uniform="net")
+        top.columnconfigure(3, weight=1, uniform="net")
+
+        widgets.field_label(top, "Rate limit (e.g. 5M, 500K)").grid(
+            row=0, column=0, sticky="W")
+        self.txt_rate = widgets.entry(top)
+        self.txt_rate.grid(row=1, column=0, sticky="EW", ipady=6, padx=(0, 10))
+
+        widgets.field_label(top, "Concurrent frags").grid(
+            row=0, column=1, sticky="W")
+        self.spn_frags = widgets.spinbox(top, 1, 32, 1)
+        self.spn_frags.grid(row=1, column=1, sticky="W", ipady=4, padx=(0, 10))
+
+        widgets.field_label(top, "Cookies from browser").grid(
+            row=0, column=2, sticky="W")
+        self.cbo_cookies = widgets.combobox(top, [
+            "None", "chrome", "firefox", "edge", "brave", "opera",
+            "safari", "vivaldi", "chromium",
+        ])
+        self.cbo_cookies.grid(row=1, column=2, sticky="EW", ipady=3, padx=(0, 10))
+
+        widgets.field_label(top, "Retries").grid(row=0, column=3, sticky="W")
+        self.spn_retries = widgets.spinbox(top, 1, 50, 10)
+        self.spn_retries.grid(row=1, column=3, sticky="W", ipady=4)
+
+        widgets.field_label(g, "Proxy (e.g. socks5://127.0.0.1:1080)").grid(
+            row=1, column=0, sticky="W", pady=(14, 3))
+        self.txt_proxy = widgets.entry(g)
+        self.txt_proxy.grid(row=2, column=0, sticky="EW", ipady=6)
 
     # ── Extra args group ─────────────────────────────────────────────────
-    def _build_extra_args_group(self, w):
-        g = w.grp("Extra yt-dlp Arguments")
+    def _build_extra_args_group(self, parent):
+        card = widgets.Card(
+            parent, "Extra yt-dlp arguments",
+            "Power-user escape hatch — flags appended to every run "
+            "verbatim.")
+        g = card.body
         g.columnconfigure(0, weight=1)
 
-        w.lbl10(g, "Any additional flags appended verbatim:").grid(
-            row=0, column=0, padx=8, pady=(8, 3), sticky="W")
-        self.txt_extra = w.ent(g)
-        self.txt_extra.grid(
-            row=1, column=0, padx=8, pady=(0, 8), sticky="EW", ipady=3)
+        self.txt_extra = widgets.entry(g)
+        self.txt_extra.grid(row=0, column=0, sticky="EW", ipady=6)
 
     # ── App Update group ─────────────────────────────────────────────────
-    def _build_app_update_group(self, w, inner):
-        g = w.grp("App Update")
+    def _build_app_update_group(self, parent):
+        card = widgets.Card(
+            parent, "App update",
+            "Checks GitHub for a newer build of DLP-UI itself.")
+        g = card.body
         g.columnconfigure(0, weight=1)
 
-        top_row = tk.Frame(g, bg=BG0)
-        top_row.grid(row=0, column=0, padx=8, pady=(8, 3), sticky="EW")
+        top_row = tk.Frame(g, bg=BG2)
+        top_row.grid(row=0, column=0, sticky="EW")
         top_row.columnconfigure(0, weight=1)
 
         tk.Label(
-            top_row, text=f"Current version: v{VERSION}", bg=BG0, fg=FG1,
-            font=("Segoe UI", 10),
+            top_row, text=f"Current version: v{VERSION}", bg=BG2, fg=FG1,
+            font=fonts.body(),
         ).grid(row=0, column=0, sticky="W")
-        self.btn_check_update = w.sbtn(
+        self.btn_check_update = widgets.secondary_button(
             top_row, "Check for Updates", self._check_app_update)
-        self.btn_check_update.grid(row=0, column=1, padx=(8, 0), ipady=3)
+        self.btn_check_update.grid(row=0, column=1, ipady=4)
 
-        self.lbl_update_status = w.slbl(g)
-        self.lbl_update_status.grid(
-            row=1, column=0, padx=8, pady=(0, 8), sticky="EW")
+        self.update_activity = widgets.ActivityBar(g, bg=BG2)
+        self.update_activity.grid(row=1, column=0, sticky="EW", pady=(6, 0))
 
-        tk.Frame(inner, bg=BG0, height=8).pack()
+        self.lbl_update_status = widgets.status_label(g)
+        self.lbl_update_status.grid(row=2, column=0, sticky="EW", pady=(8, 0))
 
     # ── yt-dlp path helpers ──────────────────────────────────────────────
     def _refresh_ytdlp_status(self):
@@ -457,7 +591,7 @@ class SettingsTabMixin:
     def _browse_ytdlp(self):
         path = filedialog.askopenfilename(
             title="Locate yt-dlp executable",
-            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+            filetypes=_EXE_FILETYPES,
             initialdir=(
                 str(Path(self.ytdlp_path).parent) if self.ytdlp_path
                 else str(Path.home())
@@ -477,13 +611,15 @@ class SettingsTabMixin:
 
     def _download_ytdlp(self):
         dest_dir = BASE / "yt-dlp"
-        dest_file = dest_dir / "yt-dlp.exe"
+        dest_file = dest_dir / f"yt-dlp{EXE}"
         action = (
             "Updating"
             if self.ytdlp_path and os.path.isfile(self.ytdlp_path)
             else "Downloading"
         )
         self.btn_get_ytdlp.config(state="disabled", text=f"{action}...")
+        widgets.start_pulse(self.btn_get_ytdlp, weight="secondary")
+        self.ytdlp_activity.start()
 
         def reporthook(count, block_size, total_size):
             mb_done = count * block_size / 1_048_576
@@ -506,6 +642,8 @@ class SettingsTabMixin:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 urllib.request.urlretrieve(
                     YTDLP_RELEASE_URL, str(dest_file), reporthook)
+                if not IS_WINDOWS:
+                    dest_file.chmod(dest_file.stat().st_mode | 0o111)
                 self.after(0, lambda: self._set_ytdlp_path(str(dest_file)))
             except Exception as exc:
                 self.after(
@@ -514,6 +652,11 @@ class SettingsTabMixin:
                         text=f"Download failed: {e}", fg=LOG_RED),
                 )
             finally:
+                self.after(0, self.ytdlp_activity.stop)
+                self.after(
+                    0,
+                    lambda: widgets.stop_pulse(self.btn_get_ytdlp, BG2),
+                )
                 self.after(
                     0,
                     lambda: self.btn_get_ytdlp.config(
@@ -593,7 +736,7 @@ class SettingsTabMixin:
     def _browse_ffmpeg(self):
         path = filedialog.askopenfilename(
             title="Locate ffmpeg executable",
-            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+            filetypes=_EXE_FILETYPES,
             initialdir=(
                 str(Path(self.ffmpeg_path).parent) if self.ffmpeg_path
                 else str(Path.home())
@@ -611,7 +754,92 @@ class SettingsTabMixin:
                 text="Auto-detect failed — use Browse or ↓ Get ffmpeg to "
                      "download it", fg=LOG_RED)
 
+    def _install_ffmpeg_via_brew(self, status_cb):
+        """Install/update ffmpeg through Homebrew — the standard,
+        trusted way to get a working ffmpeg on macOS (a copied
+        Homebrew binary depends on Homebrew's shared libraries, so it
+        can't simply be bundled into the app the way Windows bundles
+        a static ffmpeg.exe).
+
+        Returns the resolved ffmpeg path on success, None on failure;
+        either way `status_cb(text, color)` is called with a
+        human-readable result.
+        """
+        brew = shutil.which("brew")
+        if not brew:
+            status_cb(
+                "Homebrew not found — install it from brew.sh, then "
+                "run 'brew install ffmpeg', or use Browse to point at "
+                "an existing ffmpeg.", LOG_RED,
+            )
+            return None
+        self._q.put((
+            "Installing ffmpeg via Homebrew (brew install ffmpeg)...",
+            "blue",
+        ))
+        status_cb("Installing ffmpeg via Homebrew...", BLUE)
+        try:
+            proc = subprocess.Popen(
+                [brew, "install", "ffmpeg"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace",
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    self._q.put((line, "gray"))
+            proc.wait()
+            if proc.returncode != 0:
+                status_cb(
+                    f"brew install failed — exit code {proc.returncode}. "
+                    "See Output Log.", LOG_RED,
+                )
+                return None
+        except Exception as exc:
+            status_cb(f"ffmpeg install failed: {exc}", LOG_RED)
+            return None
+        found = find_ffmpeg()
+        if not found:
+            status_cb(
+                "ffmpeg installed but could not be located — try "
+                "Auto-detect.", LOG_WARN,
+            )
+        return found
+
     def _download_ffmpeg(self):
+        def _status(text, color):
+            self.after(
+                0,
+                lambda t=text, c=color: self.lbl_ffmpeg_status.config(
+                    text=t, fg=c),
+            )
+
+        if IS_MACOS:
+            action = (
+                "Updating"
+                if self.ffmpeg_path and os.path.isfile(self.ffmpeg_path)
+                else "Installing"
+            )
+            self.btn_get_ffmpeg.config(state="disabled", text=f"{action}...")
+            widgets.start_pulse(self.btn_get_ffmpeg, weight="secondary")
+            self.ffmpeg_activity.start()
+
+            def run():
+                found = self._install_ffmpeg_via_brew(_status)
+                if found:
+                    self.after(0, lambda f=found: self._set_ffmpeg_path(f))
+                self.after(0, self.ffmpeg_activity.stop)
+                self.after(
+                    0, lambda: widgets.stop_pulse(self.btn_get_ffmpeg, BG2))
+                self.after(
+                    0,
+                    lambda: self.btn_get_ffmpeg.config(
+                        state="normal", text="↓ Get ffmpeg"),
+                )
+
+            threading.Thread(target=run, daemon=True).start()
+            return
+
         dest_dir = BASE / "ffmpeg"
         action = (
             "Updating"
@@ -619,13 +847,8 @@ class SettingsTabMixin:
             else "Downloading"
         )
         self.btn_get_ffmpeg.config(state="disabled", text=f"{action}...")
-
-        def _status(text, color):
-            self.after(
-                0,
-                lambda t=text, c=color: self.lbl_ffmpeg_status.config(
-                    text=t, fg=c),
-            )
+        widgets.start_pulse(self.btn_get_ffmpeg, weight="secondary")
+        self.ffmpeg_activity.start()
 
         def reporthook(count, block_size, total_size):
             mb_done = count * block_size / 1_048_576
@@ -667,6 +890,9 @@ class SettingsTabMixin:
             except Exception as exc:
                 _status(f"Download failed: {exc}", LOG_RED)
             finally:
+                self.after(0, self.ffmpeg_activity.stop)
+                self.after(
+                    0, lambda: widgets.stop_pulse(self.btn_get_ffmpeg, BG2))
                 self.after(
                     0,
                     lambda: self.btn_get_ffmpeg.config(
@@ -740,7 +966,7 @@ class SettingsTabMixin:
     def _browse_python(self):
         path = filedialog.askopenfilename(
             title="Locate a Python interpreter",
-            filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
+            filetypes=_EXE_FILETYPES,
             initialdir=(
                 str(Path(self.python_path).parent) if self.python_path
                 else str(Path.home())
@@ -768,6 +994,8 @@ class SettingsTabMixin:
             return
 
         self.btn_install_spleeter.config(state="disabled", text="Installing...")
+        widgets.start_pulse(self.btn_install_spleeter, weight="secondary")
+        self.install_spleeter_activity.start()
         self.lbl_spleeter_status.config(
             text="Installing audio tools (this can take a few "
                  "minutes)...", fg=BLUE)
@@ -842,6 +1070,12 @@ class SettingsTabMixin:
                         text=f"✗ Installation error: {e}", fg=LOG_RED),
                 )
             finally:
+                self.after(0, self.install_spleeter_activity.stop)
+                self.after(
+                    0,
+                    lambda: widgets.stop_pulse(
+                        self.btn_install_spleeter, BG2),
+                )
                 self.after(
                     0,
                     lambda: self.btn_install_spleeter.config(
@@ -854,11 +1088,16 @@ class SettingsTabMixin:
     def _setup_embedded_python(self):
         self.btn_setup_spleeter.config(state="disabled", text="Setting up...")
         self.btn_install_spleeter.config(state="disabled")
+        widgets.start_pulse(self.btn_setup_spleeter, weight="primary")
+        self.spleeter_setup_activity.start()
         self.lbl_spleeter_status.config(
             text="Starting Spleeter auto-setup...", fg=BLUE)
 
         dest_dir = BASE / "python-embed"
-        py_exe = dest_dir / "python.exe"
+        py_exe = (
+            dest_dir / "bin" / "python3" if IS_MACOS
+            else dest_dir / "python.exe"
+        )
 
         def _status(text, color):
             self.after(
@@ -903,26 +1142,41 @@ class SettingsTabMixin:
                         "Downloading portable Python 3.10 runtime "
                         "(private to this app)...", "blue",
                     ))
+                    suffix = ".tar.gz" if IS_MACOS else ".zip"
                     with tempfile.NamedTemporaryFile(
-                        suffix=".zip", delete=False
+                        suffix=suffix, delete=False
                     ) as tmp:
                         tmp_path = tmp.name
                     urllib.request.urlretrieve(
                         EMBED_PYTHON_URL, tmp_path,
                         reporthook("Downloading Python runtime"))
                     _status("Extracting Python runtime...", BLUE)
-                    with zipfile.ZipFile(tmp_path, "r") as zf:
-                        zf.extractall(dest_dir)
+                    if IS_MACOS:
+                        # python-build-standalone archives wrap
+                        # everything in a top-level "python/" dir —
+                        # strip it so dest_dir/bin/python3 exists
+                        # directly.
+                        with tarfile.open(tmp_path, "r:gz") as tf:
+                            for member in tf.getmembers():
+                                parts = member.name.split("/", 1)
+                                if len(parts) != 2 or not parts[1]:
+                                    continue
+                                member.name = parts[1]
+                                tf.extract(member, dest_dir)
+                        py_exe.chmod(py_exe.stat().st_mode | 0o111)
+                    else:
+                        with zipfile.ZipFile(tmp_path, "r") as zf:
+                            zf.extractall(dest_dir)
+                        # Embeddable Python ships with site-packages
+                        # disabled by default — enable it so
+                        # pip-installed packages import.
+                        for pth in dest_dir.glob("python3*._pth"):
+                            text = pth.read_text(encoding="utf-8")
+                            pth.write_text(
+                                text.replace(
+                                    "#import site", "import site"),
+                                encoding="utf-8")
                     os.unlink(tmp_path)
-
-                    # Embeddable Python ships with site-packages disabled
-                    # by default — enable it so pip-installed packages
-                    # import.
-                    for pth in dest_dir.glob("python3*._pth"):
-                        text = pth.read_text(encoding="utf-8")
-                        pth.write_text(
-                            text.replace("#import site", "import site"),
-                            encoding="utf-8")
 
                 # Bootstrap pip if it isn't already usable in this
                 # runtime
@@ -1004,6 +1258,12 @@ class SettingsTabMixin:
                     (f"Audio tools auto-setup failed: {exc}", "fail"))
                 _status(f"✗ Auto-setup failed: {exc}", LOG_RED)
             finally:
+                self.after(0, self.spleeter_setup_activity.stop)
+                self.after(
+                    0,
+                    lambda: widgets.stop_pulse(
+                        self.btn_setup_spleeter, ACCENT),
+                )
                 self.after(
                     0,
                     lambda: self.btn_setup_spleeter.config(
@@ -1024,6 +1284,10 @@ class SettingsTabMixin:
         self.btn_quick_setup.config(state="disabled", text="Setting up...")
         self.btn_get_ytdlp.config(state="disabled")
         self.btn_get_ffmpeg.config(state="disabled")
+        widgets.start_pulse(self.btn_quick_setup, weight="primary")
+        self.quick_setup_activity.start()
+        self.ytdlp_activity.start()
+        self.ffmpeg_activity.start()
 
         lock = threading.Lock()
         done = [0]
@@ -1035,6 +1299,10 @@ class SettingsTabMixin:
                     return
 
             def re_enable():
+                self.quick_setup_activity.stop()
+                self.ytdlp_activity.stop()
+                self.ffmpeg_activity.stop()
+                widgets.stop_pulse(self.btn_quick_setup, ACCENT)
                 self.btn_quick_setup.config(
                     state="normal",
                     text="⚡  Quick Setup  —  download yt-dlp + ffmpeg")
@@ -1044,7 +1312,7 @@ class SettingsTabMixin:
 
         def dl_ytdlp():
             dest_dir = BASE / "yt-dlp"
-            dest_file = dest_dir / "yt-dlp.exe"
+            dest_file = dest_dir / f"yt-dlp{EXE}"
 
             def rh(count, block_size, total_size):
                 mb = count * block_size / 1_048_576
@@ -1067,6 +1335,8 @@ class SettingsTabMixin:
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 urllib.request.urlretrieve(
                     YTDLP_RELEASE_URL, str(dest_file), rh)
+                if not IS_WINDOWS:
+                    dest_file.chmod(dest_file.stat().st_mode | 0o111)
                 self.after(0, lambda: self._set_ytdlp_path(str(dest_file)))
             except Exception as exc:
                 self.after(
@@ -1075,17 +1345,29 @@ class SettingsTabMixin:
                         text=f"yt-dlp download failed: {e}", fg=LOG_RED),
                 )
             finally:
+                self.after(0, self.ytdlp_activity.stop)
                 on_both_done()
 
         def dl_ffmpeg():
-            dest_dir = BASE / "ffmpeg"
-
             def _st(text, color):
                 self.after(
                     0,
                     lambda t=text, c=color: self.lbl_ffmpeg_status.config(
                         text=t, fg=c),
                 )
+
+            if IS_MACOS:
+                try:
+                    found = self._install_ffmpeg_via_brew(_st)
+                    if found:
+                        self.after(
+                            0, lambda f=found: self._set_ffmpeg_path(f))
+                finally:
+                    self.after(0, self.ffmpeg_activity.stop)
+                    on_both_done()
+                return
+
+            dest_dir = BASE / "ffmpeg"
 
             def rh(count, block_size, total_size):
                 mb = count * block_size / 1_048_576
@@ -1124,6 +1406,7 @@ class SettingsTabMixin:
             except Exception as exc:
                 _st(f"ffmpeg download failed: {exc}", LOG_RED)
             finally:
+                self.after(0, self.ffmpeg_activity.stop)
                 on_both_done()
 
         threading.Thread(target=dl_ytdlp, daemon=True).start()
@@ -1132,6 +1415,8 @@ class SettingsTabMixin:
     # ── App self-update ──────────────────────────────────────────────────
     def _check_app_update(self):
         self.btn_check_update.config(state="disabled", text="Checking...")
+        widgets.start_pulse(self.btn_check_update, weight="secondary")
+        self.update_activity.start()
         self.lbl_update_status.config(text="Checking for updates...", fg=FG1)
 
         def _status(text, color):
@@ -1142,6 +1427,7 @@ class SettingsTabMixin:
             )
 
         def run():
+            offered = False
             try:
                 req = urllib.request.Request(
                     APP_RELEASES_API,
@@ -1152,25 +1438,27 @@ class SettingsTabMixin:
 
                 latest_tag = data.get("tag_name", "").lstrip("v")
                 assets = data.get("assets", [])
-                exe_asset = next(
-                    (a for a in assets if a["name"] == "dlp-ui.exe"), None)
+                names = _update_asset_names()
+                asset = next(
+                    (a for a in assets if a["name"] in names), None)
 
-                if not exe_asset:
+                if not asset:
                     _status(
-                        "No dlp-ui.exe asset found in latest release.",
-                        LOG_WARN)
+                        f"No {'/'.join(names)} asset found in latest "
+                        "release.", LOG_WARN)
                     return
 
                 if parse_version(latest_tag) <= parse_version(VERSION):
                     _status(f"✓ v{VERSION} — already up to date", LOG_OK)
                     return
 
-                dl_url = exe_asset["browser_download_url"]
+                dl_url = asset["browser_download_url"]
                 _status(
                     f"Update available: v{VERSION} → v{latest_tag}  —  "
                     "click the button to install",
                     LOG_WARN,
                 )
+                offered = True
                 self.after(
                     0,
                     lambda u=dl_url, v=latest_tag: self._offer_update(u, v),
@@ -1178,12 +1466,18 @@ class SettingsTabMixin:
             except Exception as exc:
                 _status(f"Could not check for updates: {exc}", LOG_RED)
             finally:
+                self.after(0, self.update_activity.stop)
                 self.after(
-                    0,
-                    lambda: self.btn_check_update.config(
-                        state="normal", text="Check for Updates",
-                        command=self._check_app_update),
-                )
+                    0, lambda: widgets.stop_pulse(self.btn_check_update, BG2))
+                # _offer_update already left the button in its "install
+                # this update" state — don't stomp back over it.
+                if not offered:
+                    self.after(
+                        0,
+                        lambda: self.btn_check_update.config(
+                            state="normal", text="Check for Updates",
+                            command=self._check_app_update),
+                    )
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1198,12 +1492,14 @@ class SettingsTabMixin:
     def _download_and_apply_update(self, download_url: str, new_ver: str):
         if not getattr(sys, "frozen", False):
             self.lbl_update_status.config(
-                text="Self-update only works in the compiled EXE, not "
+                text="Self-update only works in the packaged build, not "
                      "from source.",
                 fg=LOG_WARN)
             return
 
         self.btn_check_update.config(state="disabled", text="Downloading...")
+        widgets.start_pulse(self.btn_check_update, weight="secondary")
+        self.update_activity.start()
 
         def _status(text, color):
             self.after(
@@ -1226,7 +1522,70 @@ class SettingsTabMixin:
                     text=m, fg=BLUE),
             )
 
-        def run():
+        def _fail(msg):
+            _status(msg, LOG_RED)
+            self.after(0, self.update_activity.stop)
+            self.after(
+                0, lambda: widgets.stop_pulse(self.btn_check_update, BG2))
+            self.after(
+                0,
+                lambda: self.btn_check_update.config(
+                    state="normal", text="Check for Updates",
+                    command=self._check_app_update),
+            )
+
+        def run_macos():
+            # sys.executable is .../dlp-ui.app/Contents/MacOS/dlp-ui —
+            # walk up to the .app bundle itself.
+            app_root = Path(sys.executable).resolve().parent.parent.parent
+            if app_root.suffix != ".app":
+                _fail(
+                    "Self-update only works from within the installed "
+                    ".app bundle.")
+                return
+            tmp_zip = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".zip", delete=False
+                ) as tmp:
+                    tmp_zip = tmp.name
+                urllib.request.urlretrieve(download_url, tmp_zip, reporthook)
+
+                _status("Extracting update...", BLUE)
+                extract_dir = Path(tempfile.mkdtemp(prefix="dlp-ui-update-"))
+                with zipfile.ZipFile(tmp_zip, "r") as zf:
+                    zf.extractall(extract_dir)
+                new_app = next(extract_dir.glob("*.app"), None)
+                if not new_app:
+                    raise RuntimeError(
+                        "Update archive did not contain a .app bundle")
+
+                # The app is still running out of app_root, so the
+                # swap happens from a tiny detached shell script after
+                # this process exits — same trick as the Windows .bat
+                # updater below.
+                sh_file = app_root.parent / "._dlp-ui-updater.sh"
+                sh_file.write_text(
+                    "#!/bin/sh\n"
+                    "sleep 2\n"
+                    f'rm -rf "{app_root}"\n'
+                    f'mv "{new_app}" "{app_root}"\n'
+                    f'open "{app_root}"\n'
+                    'rm -- "$0"\n',
+                    encoding="utf-8",
+                )
+                sh_file.chmod(sh_file.stat().st_mode | 0o111)
+
+                _status(
+                    f"v{new_ver} downloaded — restarting app...", LOG_OK)
+                self.after(800, lambda: self._apply_update_macos(sh_file))
+            except Exception as exc:
+                _fail(f"Update failed: {exc}")
+            finally:
+                if tmp_zip and os.path.exists(tmp_zip):
+                    os.unlink(tmp_zip)
+
+        def run_windows():
             current = Path(sys.executable)
             new_file = current.with_name("dlp-ui-update.exe")
             bat_file = current.with_name("_dlp-ui-updater.bat")
@@ -1247,92 +1606,17 @@ class SettingsTabMixin:
                     f"v{new_ver} downloaded — restarting app...", LOG_OK)
                 self.after(800, lambda: self._apply_update(bat_file))
             except Exception as exc:
-                _status(f"Update failed: {exc}", LOG_RED)
-                self.after(
-                    0,
-                    lambda: self.btn_check_update.config(
-                        state="normal", text="Check for Updates",
-                        command=self._check_app_update),
-                )
+                _fail(f"Update failed: {exc}")
 
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(
+            target=run_macos if IS_MACOS else run_windows, daemon=True,
+        ).start()
 
     def _apply_update(self, bat_file: Path):
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
         subprocess.Popen(["cmd", "/c", str(bat_file)], creationflags=flags)
         self.on_close()
 
-
-class _SettingsWidgetFactory:
-    """Small helper-widget factories shared by every group in this tab,
-    scoped to a single parent container (mirrors the local closures the
-    original monolithic `_build_settings` used)."""
-
-    def __init__(self, inner: tk.Frame):
-        self._inner = inner
-
-    def grp(self, title):
-        f = tk.LabelFrame(
-            self._inner, text=title, bg=BG0, fg=FG1, bd=1,
-            relief="groove", font=("Segoe UI", 9))
-        f.pack(fill="x", padx=10, pady=(6, 0))
-        f.columnconfigure(1, weight=1)
-        return f
-
-    @staticmethod
-    def sbtn(parent, text, cmd, fg=FG0, border=BG3):
-        return tk.Button(
-            parent, text=text, bg=BG2, fg=fg, relief="flat", bd=0,
-            cursor="hand2", font=("Segoe UI", 9), command=cmd,
-            highlightthickness=1, highlightbackground=border,
-            activebackground=BG3, activeforeground=FG0)
-
-    @staticmethod
-    def ent(parent, default=""):
-        e = tk.Entry(
-            parent, bg=BG2, fg=FG0, insertbackground=FG0,
-            relief="solid", bd=1, font=("Segoe UI", 9))
-        if default:
-            e.insert(0, default)
-        return e
-
-    @staticmethod
-    def cbo(parent, vals):
-        c = ttk.Combobox(
-            parent, values=vals, state="readonly", font=("Segoe UI", 9))
-        c.current(0)
-        return c
-
-    @staticmethod
-    def chk(parent, text):
-        var = tk.BooleanVar()
-        cb = tk.Checkbutton(
-            parent, text=text, variable=var, bg=BG0, fg=FG1,
-            selectcolor=BG2, activebackground=BG0, activeforeground=FG0,
-            font=("Segoe UI", 10))
-        return cb, var
-
-    @staticmethod
-    def spn(parent, lo, hi, default):
-        s = tk.Spinbox(
-            parent, from_=lo, to=hi, bg=BG2, fg=FG0,
-            insertbackground=FG0, buttonbackground=BG3, relief="solid",
-            bd=1, font=("Segoe UI", 9), width=5)
-        s.delete(0, "end")
-        s.insert(0, str(default))
-        return s
-
-    @staticmethod
-    def slbl(parent):
-        lbl = tk.Label(
-            parent, text="", bg=BG0, fg=FG2, font=("Segoe UI", 9),
-            anchor="w")
-        lbl.bind(
-            "<Configure>",
-            lambda e, w=lbl: w.configure(wraplength=max(1, e.width - 4)))
-        return lbl
-
-    @staticmethod
-    def lbl10(parent, text):
-        return tk.Label(
-            parent, text=text, bg=BG0, fg=FG1, font=("Segoe UI", 10))
+    def _apply_update_macos(self, sh_file: Path):
+        subprocess.Popen(["/bin/sh", str(sh_file)], start_new_session=True)
+        self.on_close()
