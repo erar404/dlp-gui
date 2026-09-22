@@ -221,6 +221,7 @@ class Card:
 PULSE_TONES = {
     "primary": (ACCENT, ACCENT_HOVER),
     "secondary": (BG2, BG4),
+    "ghost": (BG0, BG1),
 }
 
 

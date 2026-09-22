@@ -23,6 +23,7 @@ from ..dependencies import (
     IS_WINDOWS, YTDLP_RELEASE_URL, check_librosa_installed,
     check_spleeter_installed, find_ffmpeg, find_python, find_ytdlp,
 )
+from ..email_report import send_error_report
 from ..paths import BASE, load_config, parse_version, save_config
 from ..theme import (
     ACCENT, BG0, BG1, BG2, BG3, BLUE, FG0, FG1, FG2, LOG_OK, LOG_RED,
@@ -50,8 +51,8 @@ def _update_asset_names():
             "arm64" if platform.machine() in ("arm64", "aarch64")
             else "x86_64"
         )
-        return [f"dlp-ui-macos-{arch}.zip", "dlp-ui-macos.zip"]
-    return ["dlp-ui.exe"]
+        return [f"MD-Tools-macos-{arch}.zip", "MD-Tools-macos.zip"]
+    return ["MD-Tools.exe"]
 
 
 class SettingsTabMixin:
@@ -98,6 +99,7 @@ class SettingsTabMixin:
 
         widgets.category_header(inner, "Application")
         self._build_app_update_group(inner)
+        self._build_error_reporting_group(inner)
 
         tk.Frame(inner, bg=BG0, height=12).pack()
 
@@ -479,6 +481,120 @@ class SettingsTabMixin:
 
         self.lbl_update_status = widgets.status_label(g)
         self.lbl_update_status.grid(row=2, column=0, sticky="EW", pady=(8, 0))
+
+    # ── Error reporting group ──────────────────────────────────────────
+    def _build_error_reporting_group(self, parent):
+        card = widgets.Card(
+            parent, "Error reporting",
+            "Lets you email a failed download's log straight to the "
+            "developer from the Download tab, via your own SMTP "
+            "account. Credentials are stored only in your local "
+            "dlp-ui-config.json, never bundled with the app.")
+        g = card.body
+        g.columnconfigure(0, weight=1)
+
+        cfg = load_config()
+
+        hrow = tk.Frame(g, bg=BG2)
+        hrow.grid(row=0, column=0, sticky="EW")
+        hrow.columnconfigure(0, weight=1)
+        widgets.field_label(hrow, "SMTP server").grid(
+            row=0, column=0, sticky="W")
+        widgets.field_label(hrow, "Port").grid(
+            row=0, column=1, padx=(10, 0), sticky="W")
+        self.txt_smtp_host = widgets.entry(
+            hrow, cfg.get("smtp_host", ""))
+        self.txt_smtp_host.grid(row=1, column=0, sticky="EW", ipady=6)
+        self.txt_smtp_port = widgets.entry(
+            hrow, str(cfg.get("smtp_port", "587")))
+        self.txt_smtp_port.configure(width=6)
+        self.txt_smtp_port.grid(
+            row=1, column=1, padx=(10, 0), ipady=6, sticky="W")
+
+        widgets.field_label(g, "SMTP username (sender address)").grid(
+            row=1, column=0, sticky="W", pady=(10, 3))
+        self.txt_smtp_user = widgets.entry(g, cfg.get("smtp_user", ""))
+        self.txt_smtp_user.grid(row=2, column=0, sticky="EW", ipady=6)
+
+        widgets.field_label(
+            g, "SMTP password (an app password, not your login "
+               "password)",
+        ).grid(row=3, column=0, sticky="W", pady=(10, 3))
+        self.txt_smtp_password = widgets.entry(
+            g, cfg.get("smtp_password", ""), show="*")
+        self.txt_smtp_password.grid(row=4, column=0, sticky="EW", ipady=6)
+
+        widgets.field_label(g, "Developer email (recipient)").grid(
+            row=5, column=0, sticky="W", pady=(10, 3))
+        self.txt_developer_email = widgets.entry(
+            g, cfg.get("developer_email", ""))
+        self.txt_developer_email.grid(row=6, column=0, sticky="EW", ipady=6)
+
+        for entry in (
+            self.txt_smtp_host, self.txt_smtp_port, self.txt_smtp_user,
+            self.txt_smtp_password, self.txt_developer_email,
+        ):
+            entry.bind("<FocusOut>", self._save_smtp_settings)
+            entry.bind("<Return>", self._save_smtp_settings)
+
+        self.btn_test_smtp = widgets.secondary_button(
+            g, "Send test email", self._send_test_email)
+        self.btn_test_smtp.grid(
+            row=7, column=0, sticky="EW", ipady=4, pady=(12, 0))
+        self.smtp_test_activity = widgets.ActivityBar(g, bg=BG2)
+        self.smtp_test_activity.grid(row=8, column=0, sticky="EW", pady=(6, 0))
+        self.lbl_smtp_status = widgets.status_label(g)
+        self.lbl_smtp_status.grid(row=9, column=0, sticky="EW", pady=(8, 0))
+
+    def _save_smtp_settings(self, _=None):
+        cfg = load_config()
+        cfg["smtp_host"] = self.txt_smtp_host.get().strip()
+        cfg["smtp_user"] = self.txt_smtp_user.get().strip()
+        cfg["smtp_password"] = self.txt_smtp_password.get()
+        cfg["developer_email"] = self.txt_developer_email.get().strip()
+        try:
+            cfg["smtp_port"] = int(self.txt_smtp_port.get().strip() or 587)
+        except ValueError:
+            cfg["smtp_port"] = 587
+        save_config(cfg)
+
+    def _send_test_email(self):
+        self._save_smtp_settings()
+        self.btn_test_smtp.config(state="disabled", text="Sending...")
+        widgets.start_pulse(self.btn_test_smtp, weight="secondary")
+        self.smtp_test_activity.start()
+
+        def run():
+            try:
+                send_error_report(
+                    {"url": "(test email)"},
+                    "This is a test email from DLP-UI's Settings → "
+                    "Error reporting — if you got this, sending error "
+                    "reports from the Download tab will work too.",
+                )
+                self.after(
+                    0,
+                    lambda: self.lbl_smtp_status.config(
+                        text="✓ Test email sent — check the inbox.",
+                        fg=LOG_OK),
+                )
+            except Exception as exc:
+                self.after(
+                    0,
+                    lambda e=str(exc): self.lbl_smtp_status.config(
+                        text=f"✗ Failed to send: {e}", fg=LOG_RED),
+                )
+            finally:
+                self.after(0, self.smtp_test_activity.stop)
+                self.after(
+                    0, lambda: widgets.stop_pulse(self.btn_test_smtp, BG2))
+                self.after(
+                    0,
+                    lambda: self.btn_test_smtp.config(
+                        state="normal", text="Send test email"),
+                )
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── yt-dlp path helpers ──────────────────────────────────────────────
     def _refresh_ytdlp_status(self):

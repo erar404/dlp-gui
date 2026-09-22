@@ -9,11 +9,15 @@ import subprocess
 import sys
 import tempfile
 import threading
+from pathlib import Path
+from tkinter import filedialog, messagebox
 
+from . import widgets
 from .constants import (
     SPLEETER_CHUNK_SECONDS, STEM_INSTRUMENTS, STEM_OPTIONS,
-    TEMPO_CLICK_SCRIPT,
+    TEMPO_CLICK_SCRIPT, TIME_SIGNATURE_OVERRIDES,
 )
+from .theme import BG2
 
 NUMPY_ABI_HINTS = [
     "_ARRAY_API not found",
@@ -102,6 +106,272 @@ def _probe_duration_seconds(ffmpeg_path, audio_path):
 class AudioToolsMixin:
     """Adds Spleeter split / tempo / click-track processing to App."""
 
+    def _report_abi_hint(self):
+        self._q.put((
+            "  Cause: numpy/TensorFlow version conflict in this "
+            "Python runtime.", "info",
+        ))
+        self._q.put((
+            "  Fix: Settings → Audio Tools → run ↓ Install Spleeter "
+            "(or ⚡ Auto-Setup Audio Tools) again to reinstall a "
+            "compatible numpy.", "info",
+        ))
+
+    def _run_click_analysis(
+        self, audio_file, dest_dir, base_name, *,
+        click_requested, merge_requested, progress_cb=None,
+        result_label=None,
+    ):
+        """Tempo/key/time-signature analysis and, if requested, click
+        track generation (and merging into the original audio).
+
+        Shared by the automatic post-download step, the standalone
+        "Regenerate click track" action, and the Audio Tools tab, so a
+        bad first result can be fixed by adjusting the tempo/time-
+        signature/accent controls and rerunning just this step — no
+        re-download, no re-split.
+
+        result_label defaults to the Download tab's BPM readout;
+        pass a different Label to show the result somewhere else (the
+        Audio Tools tab has its own).
+
+        Returns a dict with 'click_mp3' / 'merged_mp3' set on success.
+        """
+        progress_cb = progress_cb or (lambda text: None)
+        result_label = result_label or getattr(self, "lbl_tempo_result", None)
+        results = {}
+        tmp_wav = None
+        try:
+            self.after(0, lambda: progress_cb("Analyzing tempo..."))
+            label = (
+                "Analyzing tempo & generating click track"
+                if click_requested else "Analyzing tempo"
+            )
+            self._q.put((
+                f"{label}: {os.path.basename(audio_file)}", "blue",
+            ))
+
+            if click_requested:
+                fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+
+            timesig_choice = (
+                self.cbo_timesig.get()
+                if hasattr(self, "cbo_timesig") else "Auto-detect"
+            )
+            beats_override = TIME_SIGNATURE_OVERRIDES.get(
+                timesig_choice, "")
+
+            cmd = [
+                self.python_path, "-c", TEMPO_CLICK_SCRIPT, audio_file,
+                "1" if click_requested else "0", tmp_wav or "",
+                str(getattr(self, "_tempo_mult", 1.0)),
+                "1" if getattr(self, "_no_accents", False) else "0",
+                self.spn_tempo_min.get(), self.spn_tempo_max.get(),
+                self.spn_sensitivity.get(), beats_override,
+            ]
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=300,
+                creationflags=_no_window_flags(),
+                env=_env_with_ffmpeg(self.ffmpeg_path),
+            )
+
+            abi_mismatch = False
+            bpm_value = None
+            key_value = None
+            timesig_value = None
+            for line in (r.stdout or "").splitlines():
+                line = line.rstrip()
+                if not line:
+                    continue
+                if line.startswith("TEMPO:"):
+                    bpm_value = line.split(":", 1)[1].strip()
+                elif line.startswith("KEY:"):
+                    key_value = line.split(":", 1)[1].strip()
+                elif line.startswith("TIMESIG:"):
+                    timesig_value = line.split(":", 1)[1].strip()
+                elif not line.startswith("CLICK_WRITTEN:"):
+                    self._q.put((line, "gray"))
+            for line in (r.stderr or "").splitlines():
+                line = line.rstrip()
+                if not line:
+                    continue
+                if any(h in line for h in NUMPY_ABI_HINTS):
+                    abi_mismatch = True
+                self._q.put((line, "err"))
+
+            if r.returncode != 0:
+                self._q.put((
+                    "Tempo/click analysis failed — exit code "
+                    f"{r.returncode}.", "fail",
+                ))
+                if abi_mismatch:
+                    self._report_abi_hint()
+                return results
+
+            if bpm_value is not None:
+                summary = f"Suggested tempo: {bpm_value} BPM"
+                if key_value:
+                    summary += f" — Key: {key_value.title()}"
+                if timesig_value:
+                    summary += f" — Time: {timesig_value}"
+                summary += f" — {os.path.basename(audio_file)}"
+                self._q.put((summary, "ok"))
+                if result_label is not None:
+                    self.after(
+                        0,
+                        lambda b=bpm_value, k=key_value, t=timesig_value:
+                        result_label.config(
+                            text=(
+                                f"{b} BPM · {k.title() if k else '?'} · "
+                                f"{t or '?'}"
+                            )),
+                    )
+
+            click_ready = (
+                click_requested and tmp_wav and os.path.isfile(tmp_wav)
+            )
+            if click_ready:
+                key_slug = _slugify_key(key_value)
+                timesig_slug = _slugify_timesig(timesig_value)
+                click_mp3 = os.path.join(
+                    dest_dir,
+                    f"{base_name}_click_{key_slug}_{timesig_slug}.mp3",
+                )
+                ffmpeg_cmd = [
+                    self.ffmpeg_path, "-y", "-i", tmp_wav,
+                    "-codec:a", "libmp3lame", "-qscale:a", "2",
+                    click_mp3,
+                ]
+                fr = subprocess.run(
+                    ffmpeg_cmd, capture_output=True, text=True,
+                    creationflags=_no_window_flags(),
+                )
+                if fr.returncode == 0:
+                    self._q.put((f"Click track saved: {click_mp3}", "ok"))
+                    results["click_mp3"] = click_mp3
+
+                    if merge_requested:
+                        merged_mp3 = os.path.join(
+                            dest_dir,
+                            f"{base_name}_{key_slug}_{timesig_slug}.mp3",
+                        )
+                        merge_cmd = [
+                            self.ffmpeg_path, "-y",
+                            "-i", audio_file, "-i", click_mp3,
+                            "-filter_complex",
+                            "amix=inputs=2:duration=longest:"
+                            "normalize=0",
+                            "-codec:a", "libmp3lame",
+                            "-qscale:a", "2", merged_mp3,
+                        ]
+                        mr = subprocess.run(
+                            merge_cmd, capture_output=True, text=True,
+                            creationflags=_no_window_flags(),
+                        )
+                        if mr.returncode == 0:
+                            self._q.put((
+                                "Click track merged into audio: "
+                                f"{merged_mp3}", "ok",
+                            ))
+                            results["merged_mp3"] = merged_mp3
+                        else:
+                            self._q.put((
+                                "Failed to merge click track into "
+                                "audio — ffmpeg exit code "
+                                f"{mr.returncode}.", "fail",
+                            ))
+                else:
+                    self._q.put((
+                        "Failed to encode click track — ffmpeg exit "
+                        f"code {fr.returncode}.", "fail",
+                    ))
+        except Exception as exc:
+            self._q.put((
+                f"Error running tempo/click analysis: {exc}", "err"))
+        finally:
+            if tmp_wav and os.path.isfile(tmp_wav):
+                try:
+                    os.unlink(tmp_wav)
+                except OSError:
+                    pass
+        return results
+
+    def _regenerate_click_track(self):
+        """Redo just the tempo/key/time-signature analysis and click
+        track for a file the user already has — e.g. after seeing the
+        metronome came out wrong and adjusting the Speed/Time
+        signature/No accents controls above. Does not touch Spleeter
+        stem splitting.
+
+        When "Merge click track into downloaded audio" is checked,
+        this also re-merges the corrected click track into a fresh
+        copy of the audio — regenerating the finished, merged file,
+        not just the standalone click track.
+        """
+        if not self.python_path or not os.path.isfile(self.python_path):
+            messagebox.showwarning(
+                "Python not set",
+                "Audio tools need a configured Python interpreter "
+                "first — Settings → Audio Tools.")
+            return
+        if not self.ffmpeg_path or not os.path.isfile(self.ffmpeg_path):
+            messagebox.showwarning(
+                "ffmpeg not set",
+                "Encoding the click track needs ffmpeg — Settings → "
+                "Dependencies.")
+            return
+
+        merge_requested = self.v_merge_click.get()
+        initial_dir = self.txt_dest.get().strip() or str(Path.home())
+        audio_file = filedialog.askopenfilename(
+            title=(
+                "Pick the audio file to merge the corrected metronome "
+                "into" if merge_requested
+                else "Pick an audio file to (re)generate a click track for"
+            ),
+            initialdir=initial_dir if os.path.isdir(initial_dir) else None,
+            filetypes=[
+                ("Audio files", "*.mp3 *.wav *.m4a *.flac *.ogg"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not audio_file:
+            return
+
+        base_name = os.path.splitext(os.path.basename(audio_file))[0]
+        dest_dir = os.path.dirname(audio_file)
+
+        self.btn_regenerate_click.config(
+            state="disabled", text="Regenerating...")
+        widgets.start_pulse(self.btn_regenerate_click, weight="secondary")
+        self.regenerate_activity.start()
+
+        def progress(text):
+            self.btn_regenerate_click.config(text=text)
+
+        def run():
+            try:
+                self._run_click_analysis(
+                    audio_file, dest_dir, base_name,
+                    click_requested=True,
+                    merge_requested=merge_requested,
+                    progress_cb=progress,
+                )
+            finally:
+                self.after(0, self.regenerate_activity.stop)
+                self.after(
+                    0,
+                    lambda: widgets.stop_pulse(
+                        self.btn_regenerate_click, BG2),
+                )
+                self.after(0, lambda: self.btn_regenerate_click.config(
+                    state="normal"))
+                self.after(0, self._update_regenerate_label)
+
+        threading.Thread(target=run, daemon=True).start()
+
     def _start_next_split(self):
         if not self._split_queue:
             self._on_split_done()
@@ -132,175 +402,20 @@ class AudioToolsMixin:
         results = {}
         self.btn_dl.config(state="disabled", text="Processing audio...")
 
-        def report_abi_hint():
-            self._q.put((
-                "  Cause: numpy/TensorFlow version conflict in this "
-                "Python runtime.", "info",
-            ))
-            self._q.put((
-                "  Fix: Settings → Audio Tools → run ↓ Install Spleeter "
-                "(or ⚡ Auto-Setup Audio Tools) again to reinstall a "
-                "compatible numpy.", "info",
-            ))
-
         def run_tempo_click():
             if not need_analysis:
                 return
-            tmp_wav = None
-            try:
-                self.after(
-                    0,
-                    lambda: self.btn_dl.config(text="Analyzing tempo..."),
-                )
-                label = (
-                    "Analyzing tempo & generating click track"
-                    if self._click_requested else "Analyzing tempo"
-                )
-                self._q.put((
-                    f"{label}: {os.path.basename(audio_file)}", "blue",
-                ))
 
-                if self._click_requested:
-                    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
-                    os.close(fd)
+            def progress(text):
+                self.btn_dl.config(text=text)
 
-                cmd = [
-                    self.python_path, "-c", TEMPO_CLICK_SCRIPT, audio_file,
-                    "1" if self._click_requested else "0", tmp_wav or "",
-                    str(getattr(self, "_tempo_mult", 1.0)),
-                    "1" if getattr(self, "_no_accents", False) else "0",
-                    self.spn_tempo_min.get(), self.spn_tempo_max.get(),
-                    self.spn_sensitivity.get(),
-                ]
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, encoding="utf-8",
-                    errors="replace", timeout=300,
-                    creationflags=_no_window_flags(),
-                    env=_env_with_ffmpeg(self.ffmpeg_path),
-                )
-
-                abi_mismatch = False
-                bpm_value = None
-                key_value = None
-                timesig_value = None
-                for line in (r.stdout or "").splitlines():
-                    line = line.rstrip()
-                    if not line:
-                        continue
-                    if line.startswith("TEMPO:"):
-                        bpm_value = line.split(":", 1)[1].strip()
-                    elif line.startswith("KEY:"):
-                        key_value = line.split(":", 1)[1].strip()
-                    elif line.startswith("TIMESIG:"):
-                        timesig_value = line.split(":", 1)[1].strip()
-                    elif not line.startswith("CLICK_WRITTEN:"):
-                        self._q.put((line, "gray"))
-                for line in (r.stderr or "").splitlines():
-                    line = line.rstrip()
-                    if not line:
-                        continue
-                    if any(h in line for h in NUMPY_ABI_HINTS):
-                        abi_mismatch = True
-                    self._q.put((line, "err"))
-
-                if r.returncode != 0:
-                    self._q.put((
-                        "Tempo/click analysis failed — exit code "
-                        f"{r.returncode}.", "fail",
-                    ))
-                    if abi_mismatch:
-                        report_abi_hint()
-                    return
-
-                if bpm_value is not None:
-                    summary = f"Suggested tempo: {bpm_value} BPM"
-                    if key_value:
-                        summary += f" — Key: {key_value.title()}"
-                    if timesig_value:
-                        summary += f" — Time: {timesig_value}"
-                    summary += f" — {os.path.basename(audio_file)}"
-                    self._q.put((summary, "ok"))
-                    self.after(
-                        0,
-                        lambda b=bpm_value, k=key_value, t=timesig_value:
-                        self.lbl_tempo_result.config(
-                            text=(
-                                f"{b} BPM · {k.title() if k else '?'} · "
-                                f"{t or '?'}"
-                            )),
-                    )
-
-                click_ready = (
-                    self._click_requested and tmp_wav
-                    and os.path.isfile(tmp_wav)
-                )
-                if click_ready:
-                    key_slug = _slugify_key(key_value)
-                    timesig_slug = _slugify_timesig(timesig_value)
-                    click_mp3 = os.path.join(
-                        dest_dir,
-                        f"{base_name}_click_{key_slug}_{timesig_slug}.mp3",
-                    )
-                    ffmpeg_cmd = [
-                        self.ffmpeg_path, "-y", "-i", tmp_wav,
-                        "-codec:a", "libmp3lame", "-qscale:a", "2",
-                        click_mp3,
-                    ]
-                    fr = subprocess.run(
-                        ffmpeg_cmd, capture_output=True, text=True,
-                        creationflags=_no_window_flags(),
-                    )
-                    if fr.returncode == 0:
-                        self._q.put(
-                            (f"Click track saved: {click_mp3}", "ok"))
-                        results["click_mp3"] = click_mp3
-
-                        if self._merge_click_requested:
-                            merged_mp3 = os.path.join(
-                                dest_dir,
-                                f"{base_name}_{key_slug}_"
-                                f"{timesig_slug}.mp3",
-                            )
-                            merge_cmd = [
-                                self.ffmpeg_path, "-y",
-                                "-i", audio_file, "-i", click_mp3,
-                                "-filter_complex",
-                                "amix=inputs=2:duration=longest:"
-                                "normalize=0",
-                                "-codec:a", "libmp3lame",
-                                "-qscale:a", "2", merged_mp3,
-                            ]
-                            mr = subprocess.run(
-                                merge_cmd, capture_output=True,
-                                text=True,
-                                creationflags=_no_window_flags(),
-                            )
-                            if mr.returncode == 0:
-                                self._q.put((
-                                    "Click track merged into audio: "
-                                    f"{merged_mp3}", "ok",
-                                ))
-                                results["merged_mp3"] = merged_mp3
-                            else:
-                                self._q.put((
-                                    "Failed to merge click track into "
-                                    "audio — ffmpeg exit code "
-                                    f"{mr.returncode}.", "fail",
-                                ))
-                    else:
-                        self._q.put((
-                            "Failed to encode click track — ffmpeg exit "
-                            f"code {fr.returncode}.", "fail",
-                        ))
-            except Exception as exc:
-                self._q.put((
-                    f"Error running tempo/click analysis: {exc}", "err"))
-            finally:
-                if tmp_wav and os.path.isfile(tmp_wav):
-                    try:
-                        os.unlink(tmp_wav)
-                    except OSError:
-                        pass
+            click_results = self._run_click_analysis(
+                audio_file, dest_dir, base_name,
+                click_requested=self._click_requested,
+                merge_requested=self._merge_click_requested,
+                progress_cb=progress,
+            )
+            results.update(click_results)
 
         def run_one_spleeter_pass(cmd):
             """Run one `spleeter separate` invocation, streaming its
@@ -419,7 +534,7 @@ class AudioToolsMixin:
                             "missing ffmpeg).", "fail",
                         ))
                         if abi_mismatch:
-                            report_abi_hint()
+                            self._report_abi_hint()
                     return
 
                 # Spleeter (CPU, Windows, this TensorFlow build) crashes
@@ -466,7 +581,7 @@ class AudioToolsMixin:
                                 "missing ffmpeg).", "fail",
                             ))
                             if abi_mismatch:
-                                report_abi_hint()
+                                self._report_abi_hint()
                             return
                         chunk_dirs.append(chunk_out)
 

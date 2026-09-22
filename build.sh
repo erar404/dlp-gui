@@ -1,9 +1,9 @@
 #!/bin/sh
-# DLP-UI macOS build script — produces dist/dlp-ui.app (and a zip of it,
-# named to match the in-app self-updater's expected asset name).
+# MD Tools macOS build script — produces dist/MD-Tools.app (and a zip of
+# it, named to match the in-app self-updater's expected asset name).
 set -e
 
-echo "=== DLP-UI macOS Build Script ==="
+echo "=== MD Tools macOS Build Script ==="
 echo
 
 if [ "$(uname -s)" != "Darwin" ]; then
@@ -80,12 +80,12 @@ PYEOF
 fi
 
 # ── Build ─────────────────────────────────────────────────────────────
-echo "Building dlp-ui.app..."
+echo "Building MD-Tools.app..."
 python3 -m PyInstaller dlp-ui-macos.spec
 
 echo
-if [ -d "dist/dlp-ui.app" ]; then
-    echo "Build successful: dist/dlp-ui.app"
+if [ -d "dist/MD-Tools.app" ]; then
+    echo "Build successful: dist/MD-Tools.app"
 
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -93,10 +93,10 @@ if [ -d "dist/dlp-ui.app" ]; then
         x86_64) ASSET_ARCH=x86_64 ;;
         *) ASSET_ARCH="$ARCH" ;;
     esac
-    ZIP_NAME="dlp-ui-macos-${ASSET_ARCH}.zip"
+    ZIP_NAME="MD-Tools-macos-${ASSET_ARCH}.zip"
     echo "Zipping for release as dist/${ZIP_NAME}..."
     (cd dist && rm -f "${ZIP_NAME}" && ditto -c -k --sequesterRsrc \
-        --keepParent dlp-ui.app "${ZIP_NAME}")
+        --keepParent MD-Tools.app "${ZIP_NAME}")
     echo "  -> dist/${ZIP_NAME}"
 else
     echo "Build may have failed. Check the output above."

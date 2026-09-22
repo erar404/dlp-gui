@@ -64,6 +64,21 @@ TEMPO_MULTIPLIERS = {
     "1/2x (half time)": "0.5",
 }
 
+# Manual time-signature override. The automatic heuristic gets tricked
+# most often by "relative" signatures — the same physical beat grid
+# reinterpreted with a different grouping (6/8's two groups of three
+# vs. 3/4's three groups of two is the classic confusable pair) — so
+# this lets the user force the grouping directly instead of fighting
+# the heuristic. Empty string means "keep auto-detecting".
+TIME_SIGNATURE_OVERRIDES = {
+    "Auto-detect": "",
+    "2/4": "2",
+    "3/4": "3",
+    "4/4": "4",
+    "5/4": "5",
+    "6/8": "6",
+}
+
 # Spleeter (on CPU, on Windows, with this TensorFlow build) reliably
 # crashes with a native STATUS_STACK_BUFFER_OVERRUN (0xC0000409) when
 # asked to separate more than a few minutes of audio in one pass —
@@ -76,14 +91,18 @@ SPLEETER_CHUNK_SECONDS = 120
 # are installed alongside it).
 # Invoked as:
 #   python -c TEMPO_CLICK_SCRIPT <audio> <0|1> [click_wav_out] \
-#       [tempo_mult] [no_accents 0|1] [min_bpm] [max_bpm] [tightness]
+#       [tempo_mult] [no_accents 0|1] [min_bpm] [max_bpm] [tightness] \
+#       [beats_per_bar_override]
 # tempo_mult manually corrects for beat-tracker "octave errors" (locking
 # onto half/double the true tempo) — 1 (default), 2, or 0.5.
 # min_bpm/max_bpm bias and then constrain the detected tempo to a
 # plausible range for the material (also octave-error correction, just
 # automatic instead of manual); tightness controls how rigidly the
 # beat tracker follows a steady grid vs. loosely following the audio's
-# actual onsets (librosa default: 100).
+# actual onsets (librosa default: 100). beats_per_bar_override forces
+# the time signature's beat grouping (2/3/4/5/6) instead of guessing —
+# mainly for "relative" signatures the heuristic easily confuses, like
+# 6/8 vs. 3/4 (the same beat grid, grouped in twos vs. threes).
 # Prints "TEMPO:<bpm>" (already adjusted by tempo_mult),
 # "KEY:<root> <major|minor>", "TIMESIG:<n>/<d>", and, when a click track
 # was requested, "CLICK_WRITTEN:<path>".
@@ -101,6 +120,9 @@ no_accents = len(sys.argv) > 5 and sys.argv[5] == "1"
 min_bpm = float(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else 60.0
 max_bpm = float(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else 200.0
 tightness = float(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else 100.0
+beats_override = (
+    int(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9] else 0
+)
 if min_bpm > max_bpm:
     min_bpm, max_bpm = max_bpm, min_bpm
 
@@ -177,7 +199,7 @@ else:
     key_root, key_mode = PITCH_CLASSES[min_i], "minor"
 print(f"KEY:{key_root} {key_mode}")
 
-# --- Time signature (heuristic) ---------------------------------------
+# --- Time signature (heuristic, or a manual override) -----------------
 # True time-signature detection is an open research problem — this is
 # a best-effort estimate, not a guarantee. For each candidate beat
 # count per bar, it checks how much stronger the onset envelope is on
@@ -185,23 +207,31 @@ print(f"KEY:{key_root} {key_mode}")
 # tend to be accented); the candidate with the clearest accent pattern
 # wins. Falls back to 4/4 — by far the most common signature — on a
 # tie or when there aren't enough beats to judge.
-onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-beat_idx = np.clip(beat_frames, 0, len(onset_env) - 1)
-beat_strengths = onset_env[beat_idx]
-
+#
+# The heuristic's classic failure is confusing "relative" signatures —
+# the same beat grid grouped differently, especially 6/8 (two groups
+# of three) vs. 3/4 (three groups of two) — so beats_override lets the
+# caller force the grouping directly instead of re-guessing.
 TIME_SIGNATURES = {2: "2/4", 3: "3/4", 4: "4/4", 5: "5/4", 6: "6/8"}
-beats_per_bar, best_contrast = 4, -np.inf
-if len(beat_strengths) >= 8:
-    for n in TIME_SIGNATURES:
-        if len(beat_strengths) < n * 2:
-            continue
-        groups = [beat_strengths[i::n] for i in range(n)]
-        means = [g.mean() for g in groups if len(g)]
-        if len(means) < n:
-            continue
-        contrast = max(means) - (sum(means) / len(means))
-        if contrast > best_contrast:
-            beats_per_bar, best_contrast = n, contrast
+if beats_override in TIME_SIGNATURES:
+    beats_per_bar = beats_override
+else:
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    beat_idx = np.clip(beat_frames, 0, len(onset_env) - 1)
+    beat_strengths = onset_env[beat_idx]
+
+    beats_per_bar, best_contrast = 4, -np.inf
+    if len(beat_strengths) >= 8:
+        for n in TIME_SIGNATURES:
+            if len(beat_strengths) < n * 2:
+                continue
+            groups = [beat_strengths[i::n] for i in range(n)]
+            means = [g.mean() for g in groups if len(g)]
+            if len(means) < n:
+                continue
+            contrast = max(means) - (sum(means) / len(means))
+            if contrast > best_contrast:
+                beats_per_bar, best_contrast = n, contrast
 time_sig = TIME_SIGNATURES[beats_per_bar]
 print(f"TIMESIG:{time_sig}")
 

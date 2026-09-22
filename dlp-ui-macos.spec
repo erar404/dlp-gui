@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# macOS build — produces dist/dlp-ui.app.
+# macOS build — produces dist/MD-Tools.app.
 #
 # ffmpeg is deliberately NOT bundled here (see download_deps.py): a
 # copied Homebrew binary depends on Homebrew's own shared libraries,
@@ -31,7 +31,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='dlp-ui',
+    name='MD-Tools',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -51,17 +51,17 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='dlp-ui',
+    name='MD-Tools',
 )
 
 app = BUNDLE(
     coll,
-    name='dlp-ui.app',
+    name='MD-Tools.app',
     icon='icon.icns',
-    bundle_identifier='com.erar404.dlpui',
+    bundle_identifier='com.erar404.mdtools',
     info_plist={
-        'CFBundleName': 'DLP-UI',
-        'CFBundleDisplayName': 'DLP-UI',
+        'CFBundleName': 'MD Tools',
+        'CFBundleDisplayName': 'MD Tools',
         'CFBundleShortVersionString': '1.0.0',
         'NSHighResolutionCapable': True,
         'LSApplicationCategoryType': 'public.app-category.video',

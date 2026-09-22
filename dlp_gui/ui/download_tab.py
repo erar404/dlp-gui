@@ -16,9 +16,10 @@ from tkinter import filedialog, messagebox
 from .. import fonts, widgets
 from ..constants import (
     AUDIO_QUALITIES, FORMAT_TYPES, STEM_OPTIONS, TEMPO_MULTIPLIERS,
-    VIDEO_QUALITIES,
+    TIME_SIGNATURE_OVERRIDES, VIDEO_QUALITIES,
 )
 from ..dependencies import check_librosa_installed, check_spleeter_installed
+from ..email_report import send_error_report, smtp_config_ready
 from ..theme import (
     ACCENT, ACCENT_HOVER, ACCENT_INK, BG0, BG1, BG2, BG3, BLUE, FG0, FG1,
     FG2, LOG_FAIL, LOG_GRAY, LOG_GREEN, LOG_OK, LOG_RED, LOG_WARN,
@@ -57,16 +58,23 @@ class DownloadTabMixin:
     """Adds the Download tab and its behavior to the main App window."""
 
     # ── UI construction ───────────────────────────────────────────────
+    # The log always keeps at least this much height, however tall
+    # the audio tools panel above gets — it's what you watch while a
+    # download runs, so it must never be the part that silently loses
+    # the fight for space. (The other half of that guarantee is the
+    # capped-growth audio tools body — see _AUDIO_BODY_CAP.)
+    _LOG_MIN_HEIGHT = 150
+
     def _build_download(self):
         p = self.tab_dl
         p.columnconfigure(0, weight=1)
-        p.rowconfigure(9, weight=1)   # log row expands
+        p.rowconfigure(9, weight=1, minsize=self._LOG_MIN_HEIGHT)
 
         # URL — the one thing this whole app is for, so it's the
         # largest, most prominent field on the page.
         tk.Label(
             p, text="Video URL", bg=BG0, fg=FG1, font=fonts.body(11),
-        ).grid(row=0, column=0, padx=18, pady=(18, 4), sticky="W")
+        ).grid(row=0, column=0, padx=18, pady=(12, 3), sticky="W")
         url_wrap = tk.Frame(p, bg=BG0)
         url_wrap.grid(row=1, column=0, padx=18, sticky="EW")
         url_wrap.columnconfigure(0, weight=1)
@@ -77,7 +85,7 @@ class DownloadTabMixin:
             relief="flat", bd=0, highlightthickness=1,
             highlightbackground=BG3, highlightcolor=ACCENT,
             font=fonts.body(12))
-        self.txt_url.grid(row=0, column=0, sticky="EW", ipady=10)
+        self.txt_url.grid(row=0, column=0, sticky="EW", ipady=8)
         self.txt_url.bind("<KeyRelease>", self._check_playlist_url)
         self.txt_url.bind(
             "<<Paste>>", lambda e: self.after(10, self._check_playlist_url))
@@ -93,7 +101,7 @@ class DownloadTabMixin:
 
         # Format / Quality
         fq = tk.Frame(p, bg=BG0)
-        fq.grid(row=2, column=0, padx=18, pady=(16, 0), sticky="EW")
+        fq.grid(row=2, column=0, padx=18, pady=(8, 0), sticky="EW")
         fq.columnconfigure(0, weight=1)
         fq.columnconfigure(1, weight=1)
         widgets.field_label(fq, "Format", bg=BG0).grid(
@@ -101,25 +109,25 @@ class DownloadTabMixin:
         widgets.field_label(fq, "Quality / resolution", bg=BG0).grid(
             row=0, column=1, padx=(10, 0), sticky="W")
         self.cbo_fmt = widgets.combobox(fq, list(FORMAT_TYPES))
-        self.cbo_fmt.grid(row=1, column=0, sticky="EW", ipady=4, pady=(4, 0))
+        self.cbo_fmt.grid(row=1, column=0, sticky="EW", ipady=3, pady=(3, 0))
         self.cbo_qual = widgets.combobox(fq, list(VIDEO_QUALITIES))
         self.cbo_qual.grid(
-            row=1, column=1, sticky="EW", padx=(10, 0), ipady=4, pady=(4, 0))
+            row=1, column=1, sticky="EW", padx=(10, 0), ipady=3, pady=(3, 0))
         self.cbo_fmt.bind("<<ComboboxSelected>>", self._fmt_changed)
 
         self._build_audio_tools_frame(p)
 
         # Destination
         widgets.field_label(p, "Destination folder", bg=BG0).grid(
-            row=4, column=0, padx=18, pady=(16, 4), sticky="W")
+            row=4, column=0, padx=18, pady=(8, 2), sticky="W")
         dest = tk.Frame(p, bg=BG0)
         dest.grid(row=5, column=0, padx=18, sticky="EW")
         dest.columnconfigure(0, weight=1)
         self.txt_dest = widgets.entry(dest)
         self.txt_dest.insert(0, str(Path.home() / "Videos"))
-        self.txt_dest.grid(row=0, column=0, sticky="EW", ipady=8)
+        self.txt_dest.grid(row=0, column=0, sticky="EW", ipady=6)
         widgets.secondary_button(dest, "Browse…", self._browse).grid(
-            row=0, column=1, padx=(8, 0), ipady=8)
+            row=0, column=1, padx=(8, 0), ipady=6)
 
         # Dependency reminder — warns before downloading if yt-dlp/ffmpeg
         # aren't ready. A bordered banner (not just colored text) so it
@@ -141,7 +149,7 @@ class DownloadTabMixin:
 
         # Download / Stop buttons
         btn_frame = tk.Frame(p, bg=BG0)
-        btn_frame.grid(row=7, column=0, padx=18, pady=(16, 0), sticky="EW")
+        btn_frame.grid(row=7, column=0, padx=18, pady=(8, 0), sticky="EW")
         btn_frame.columnconfigure(0, weight=1)
 
         self.btn_dl = tk.Button(
@@ -171,7 +179,7 @@ class DownloadTabMixin:
         # it reads as a distinct embedded module, not just more page.
         log_card = tk.Frame(
             p, bg=BG1, highlightthickness=1, highlightbackground=BG3)
-        log_card.grid(row=9, column=0, padx=18, pady=(18, 14), sticky="NSEW")
+        log_card.grid(row=9, column=0, padx=18, pady=(10, 10), sticky="NSEW")
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
 
@@ -182,8 +190,13 @@ class DownloadTabMixin:
             log_head, text="Output log", bg=BG1, fg=FG1,
             font=fonts.body_bold(10),
         ).grid(row=0, column=0, sticky="W")
+        self.btn_email_error = widgets.ghost_button(
+            log_head, "✉ Email to developer", self._email_error_report,
+            fg=LOG_WARN)
+        self.btn_email_error.grid(row=0, column=1, ipadx=6, ipady=2)
+        self.btn_email_error.grid_remove()
         widgets.ghost_button(log_head, "Clear", self._clear).grid(
-            row=0, column=1, ipadx=6, ipady=2)
+            row=0, column=2, padx=(6, 0), ipadx=6, ipady=2)
 
         log_f = tk.Frame(log_card, bg=BG1)
         log_f.grid(row=1, column=0, sticky="NSEW", padx=12, pady=(0, 12))
@@ -192,7 +205,7 @@ class DownloadTabMixin:
 
         self.log = tk.Text(
             log_f, bg="#0a0a0c", fg=LOG_GRAY, state="disabled",
-            relief="flat", bd=0, wrap="word", font=self._mono(),
+            relief="flat", bd=0, wrap="word", font=self._mono(), height=6,
             highlightthickness=1, highlightbackground=BG3, padx=10, pady=8)
         self.log.grid(row=0, column=0, sticky="NSEW")
 
@@ -212,87 +225,151 @@ class DownloadTabMixin:
         self._fmt_changed()
         self._update_dep_banner()
 
+    # The checkbox/combobox body is the one part of this panel whose
+    # height genuinely varies with how many options are turned on —
+    # capping it (it scrolls internally past this height) keeps the
+    # whole panel's growth bounded, so a fully expanded state never
+    # pushes Destination folder / the buttons / the Output Log out of
+    # the window.
+    _AUDIO_BODY_CAP = 74
+
     def _build_audio_tools_frame(self, parent):
         """Spleeter split / click track / tempo — shown only for MP3."""
         self.split_frame = tk.Frame(
             parent, bg=BG1, highlightthickness=1, highlightbackground=BG3)
-        self.split_frame.columnconfigure(1, weight=1)
+        self.split_frame.columnconfigure(0, weight=1)
 
         tk.Label(
             self.split_frame, text="Audio tools", bg=BG1, fg=FG1,
             font=fonts.small_bold(),
-        ).grid(
-            row=0, column=0, columnspan=2, padx=10, pady=(8, 2), sticky="W")
+        ).grid(row=0, column=0, padx=10, pady=(6, 2), sticky="W")
+
+        body_row = tk.Frame(self.split_frame, bg=BG1)
+        body_row.grid(row=1, column=0, sticky="EW")
+        body_row.columnconfigure(0, weight=1)
+
+        body_canvas = tk.Canvas(body_row, bg=BG1, highlightthickness=0)
+        body_scroll = tk.Scrollbar(
+            body_row, orient="vertical", command=body_canvas.yview,
+            bg=BG2, troughcolor=BG1, activebackground=BG3)
+        body_canvas.configure(yscrollcommand=body_scroll.set)
+        body_canvas.grid(row=0, column=0, sticky="EW")
+        body_scroll.grid(row=0, column=1, sticky="NS")
+
+        g = tk.Frame(body_canvas, bg=BG1)
+        g.columnconfigure(1, weight=1)
+        canvas_window = body_canvas.create_window(
+            (0, 0), window=g, anchor="nw")
+
+        def _resize_body(_=None):
+            body_canvas.configure(scrollregion=body_canvas.bbox("all"))
+            needed = g.winfo_reqheight()
+            body_canvas.configure(height=min(needed, self._AUDIO_BODY_CAP))
+            if needed > self._AUDIO_BODY_CAP:
+                body_scroll.grid()
+            else:
+                body_scroll.grid_remove()
+
+        g.bind("<Configure>", _resize_body)
+        body_canvas.bind(
+            "<Configure>",
+            lambda e: body_canvas.itemconfig(canvas_window, width=e.width))
+
+        def _on_wheel(e):
+            body_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        body_canvas.bind("<MouseWheel>", _on_wheel)
+        g.bind("<MouseWheel>", _on_wheel)
 
         self.v_split = tk.BooleanVar()
         self.chk_split = tk.Checkbutton(
-            self.split_frame, text="Split audio tracks (Spleeter AI)",
+            g, text="Split audio tracks (Spleeter AI)",
             variable=self.v_split, bg=BG1, fg=FG1, selectcolor=BG2,
             activebackground=BG1, activeforeground=FG0,
             font=fonts.body(),
             command=lambda: self._on_audio_checkbox("spleeter", self.v_split))
         self.chk_split.grid(
-            row=1, column=0, padx=(8, 6), pady=2, sticky="W")
+            row=0, column=0, padx=(8, 6), pady=1, sticky="W")
 
-        self.cbo_stems = widgets.combobox(self.split_frame, list(STEM_OPTIONS))
+        self.cbo_stems = widgets.combobox(g, list(STEM_OPTIONS))
         self.cbo_stems.grid(
-            row=1, column=1, padx=(0, 8), pady=2, sticky="EW", ipady=2)
+            row=0, column=1, padx=(0, 8), pady=1, sticky="EW", ipady=2)
 
         self.v_click = tk.BooleanVar()
         self.chk_click = tk.Checkbutton(
-            self.split_frame, text="Generate click track (librosa)",
+            g, text="Generate click track (librosa)",
             variable=self.v_click, bg=BG1, fg=FG1, selectcolor=BG2,
             activebackground=BG1, activeforeground=FG0,
             font=fonts.body(),
             command=lambda: self._on_audio_checkbox("librosa", self.v_click))
         self.chk_click.grid(
-            row=2, column=0, padx=(8, 6), pady=2, sticky="W")
+            row=1, column=0, padx=(8, 6), pady=1, sticky="W")
 
-        self.cbo_tempo_mult = widgets.combobox(
-            self.split_frame, list(TEMPO_MULTIPLIERS))
+        self.cbo_tempo_mult = widgets.combobox(g, list(TEMPO_MULTIPLIERS))
         self.cbo_tempo_mult.grid(
-            row=2, column=1, padx=(0, 8), pady=2, sticky="EW", ipady=2)
+            row=1, column=1, padx=(0, 8), pady=1, sticky="EW", ipady=2)
 
+        tk.Label(
+            g, text="Time signature:", bg=BG1, fg=FG1, font=fonts.body(),
+        ).grid(row=2, column=0, padx=(24, 6), pady=1, sticky="W")
+        self.cbo_timesig = widgets.combobox(g, list(TIME_SIGNATURE_OVERRIDES))
+        self.cbo_timesig.grid(
+            row=2, column=1, padx=(0, 8), pady=1, sticky="EW", ipady=2)
+
+        accents_row = tk.Frame(g, bg=BG1)
+        accents_row.grid(
+            row=3, column=0, columnspan=2, padx=(24, 6), pady=1, sticky="W")
         self.v_merge_click = tk.BooleanVar()
         self.chk_merge_click = tk.Checkbutton(
-            self.split_frame,
-            text="Merge click track into downloaded audio",
+            accents_row, text="Merge into audio",
             variable=self.v_merge_click, bg=BG1, fg=FG1, selectcolor=BG2,
             activebackground=BG1, activeforeground=FG0,
             font=fonts.body(),
-            command=lambda: self._on_audio_checkbox(
-                "librosa", self.v_merge_click))
-        self.chk_merge_click.grid(
-            row=3, column=0, columnspan=2, padx=(24, 6), pady=2,
-            sticky="W")
+            command=self._on_merge_click_toggled)
+        self.chk_merge_click.pack(side="left")
 
         self.v_no_accents = tk.BooleanVar()
         self.chk_no_accents = tk.Checkbutton(
-            self.split_frame,
-            text="No accents (flat click, no downbeat emphasis)",
+            accents_row, text="No accents",
             variable=self.v_no_accents, bg=BG1, fg=FG1, selectcolor=BG2,
             activebackground=BG1, activeforeground=FG0,
             font=fonts.body(),
         )
-        self.chk_no_accents.grid(
-            row=4, column=0, columnspan=2, padx=(24, 6), pady=2,
-            sticky="W")
+        self.chk_no_accents.pack(side="left", padx=(16, 0))
 
         self.v_tempo = tk.BooleanVar()
         self.chk_tempo = tk.Checkbutton(
-            self.split_frame, text="Show suggested tempo (BPM)",
+            g, text="Show suggested tempo (BPM)",
             variable=self.v_tempo, bg=BG1, fg=FG1, selectcolor=BG2,
             activebackground=BG1, activeforeground=FG0,
             font=fonts.body(),
             command=lambda: self._on_audio_checkbox("librosa", self.v_tempo))
-        self.chk_tempo.grid(
-            row=5, column=0, padx=(8, 6), pady=(2, 8), sticky="W")
+        self.chk_tempo.grid(row=4, column=0, padx=(8, 6), pady=1, sticky="W")
 
         self.lbl_tempo_result = tk.Label(
-            self.split_frame, text="", bg=BG1, fg=ACCENT,
-            font=fonts.small_bold())
-        self.lbl_tempo_result.grid(
-            row=5, column=1, padx=(0, 8), pady=(2, 8), sticky="W")
+            g, text="", bg=BG1, fg=ACCENT, font=fonts.small_bold())
+        self.lbl_tempo_result.grid(row=4, column=1, padx=(0, 8), sticky="W")
+
+        tk.Frame(self.split_frame, bg=BG3, height=1).grid(
+            row=2, column=0, sticky="EW", padx=8, pady=(6, 6))
+
+        self.btn_regenerate_click = widgets.secondary_button(
+            self.split_frame, "↻ Regenerate click track…",
+            self._regenerate_click_track)
+        self.btn_regenerate_click.grid(
+            row=3, column=0, padx=8, pady=(0, 2), sticky="EW", ipady=3)
+        self.lbl_regenerate_hint = tk.Label(
+            self.split_frame, bg=BG1, fg=FG2, font=fonts.small(),
+            justify="left", wraplength=520,
+        )
+        self.lbl_regenerate_hint.grid(
+            row=4, column=0, padx=8, pady=(0, 4), sticky="W")
+
+        self.regenerate_activity = widgets.ActivityBar(self.split_frame, bg=BG1)
+        self.regenerate_activity.grid(
+            row=5, column=0, sticky="EW", padx=8, pady=(0, 6))
+
+        self._update_regenerate_label()
 
     # ── Audio tools setup prompt ────────────────────────────────────────
     def _on_audio_checkbox(self, kind, var):
@@ -302,6 +379,29 @@ class DownloadTabMixin:
         time."""
         if var.get():
             self._ensure_audio_tools(kind)
+
+    def _on_merge_click_toggled(self):
+        self._on_audio_checkbox("librosa", self.v_merge_click)
+        self._update_regenerate_label()
+
+    def _update_regenerate_label(self):
+        """Keep the Regenerate button's label (and hint) honest about
+        what it will actually produce, based on the Merge checkbox —
+        so "regenerate the merged audio with the new metronome" is a
+        single, obvious action rather than a hidden side effect of an
+        unrelated checkbox."""
+        if self.v_merge_click.get():
+            self.btn_regenerate_click.config(
+                text="↻ Regenerate merged audio (new metronome)…")
+            self.lbl_regenerate_hint.config(
+                text="Redoes the click track and re-merges it — for a "
+                     "file you already downloaded.")
+        else:
+            self.btn_regenerate_click.config(
+                text="↻ Regenerate click track…")
+            self.lbl_regenerate_hint.config(
+                text="For a file you already downloaded — check “Merge "
+                     "into audio” above to also get a merged copy.")
 
     def _ensure_audio_tools(self, kind):
         dismissed = getattr(self, "_audio_prompt_dismissed", None)
@@ -372,7 +472,7 @@ class DownloadTabMixin:
 
         if self.cbo_fmt.get() == "MP3":
             self.split_frame.grid(
-                row=3, column=0, padx=18, pady=(16, 0), sticky="EW")
+                row=3, column=0, padx=18, pady=(8, 0), sticky="EW")
         else:
             self.v_split.set(False)
             self.v_click.set(False)
@@ -380,6 +480,7 @@ class DownloadTabMixin:
             self.v_no_accents.set(False)
             self.v_tempo.set(False)
             self.cbo_tempo_mult.current(0)
+            self.cbo_timesig.current(0)
             self.lbl_tempo_result.config(text="")
             self.split_frame.grid_remove()
 
@@ -434,15 +535,68 @@ class DownloadTabMixin:
 
     # ── Log helpers ────────────────────────────────────────────────────
     def _log(self, text, tag="gray"):
-        self.log.config(state="normal")
-        self.log.insert("end", text + "\n", tag)
-        self.log.see("end")
-        self.log.config(state="disabled")
+        # Broadcast to every log widget that exists — right now that's
+        # this tab's Output Log always, plus the Audio Tools tab's own
+        # log when it's been built, since both tabs' actions funnel
+        # through the same background-task queue.
+        for widget in (self.log, getattr(self, "audio_log", None)):
+            if widget is None:
+                continue
+            widget.config(state="normal")
+            widget.insert("end", text + "\n", tag)
+            widget.see("end")
+            widget.config(state="disabled")
 
     def _clear(self):
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
+        self._last_error_context = None
+        self.btn_email_error.grid_remove()
+
+    # ── Error report emailing ────────────────────────────────────────
+    def _email_error_report(self):
+        if not smtp_config_ready():
+            messagebox.showinfo(
+                "Email not set up",
+                "Set up SMTP first — Settings → Application → Error "
+                "reporting.",
+            )
+            self._nb.select(self.tab_cfg)
+            return
+        if not messagebox.askyesno(
+            "Email error report",
+            "Send this failed download's log to the developer by "
+            "email?\n\nIt includes the URL, format/quality, "
+            "destination folder, and the full Output Log shown above.",
+        ):
+            return
+
+        context = dict(self._last_error_context or {})
+        log_text = self.log.get("1.0", "end")
+
+        self.btn_email_error.config(state="disabled", text="Sending...")
+        widgets.start_pulse(self.btn_email_error, weight="ghost")
+
+        def run():
+            try:
+                send_error_report(context, log_text)
+                self._q.put(
+                    ("Error report emailed to the developer.", "ok"))
+            except Exception as exc:
+                self._q.put((f"Could not send error report: {exc}", "err"))
+            finally:
+                self.after(
+                    0,
+                    lambda: widgets.stop_pulse(self.btn_email_error, BG1),
+                )
+                self.after(
+                    0,
+                    lambda: self.btn_email_error.config(
+                        state="normal", text="✉ Email to developer"),
+                )
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _poll(self):
         try:
@@ -485,6 +639,11 @@ class DownloadTabMixin:
                 return
             else:
                 self._log(f"Failed — exit code {ec}.", "fail")
+                self._last_error_context = {
+                    **getattr(self, "_current_run_context", {}),
+                    "exit_code": ec,
+                }
+                self.btn_email_error.grid()
         self._log("")
         self._reset_buttons()
 
@@ -573,6 +732,14 @@ class DownloadTabMixin:
                 "Continue and download the whole playlist?",
             ):
                 return
+
+        # A fresh attempt — any error-report offer from a previous run
+        # no longer applies.
+        self._current_run_context = {
+            "url": url, "format": fmt, "quality": qual, "destination": dest,
+        }
+        self._last_error_context = None
+        self.btn_email_error.grid_remove()
 
         s = self._gather_settings()
         args = build_args(fmt, qual, dest, url, s)

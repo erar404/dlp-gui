@@ -1,6 +1,6 @@
 <div align="center">
 
-# <span style="color:#dc2626">DLP-UI</span>
+# <span style="color:#dc2626">MD Tools</span>
 
 <span style="color:#666">A dark-themed GUI wrapper for yt-dlp — download any video or audio with one click</span>
 
@@ -37,7 +37,7 @@
 
 ## 🎯 Overview
 
-**DLP-UI** is a lightweight, portable Windows GUI that wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp) — the most capable video downloader available. Instead of memorising command-line flags, users paste a URL, pick a format and quality, and click Download. All yt-dlp options (subtitles, SponsorBlock, remux, proxy, cookies, custom templates) are surfaced as controls.
+**MD Tools** is a lightweight, portable Windows GUI that wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp) — the most capable video downloader available. Instead of memorising command-line flags, users paste a URL, pick a format and quality, and click Download. All yt-dlp options (subtitles, SponsorBlock, remux, proxy, cookies, custom templates) are surfaced as controls.
 
 The app ships in two forms that are functionally identical:
 
@@ -123,10 +123,13 @@ When **MP3** is selected as the format, three extra options appear:
   - The downbeat of every bar is accented with a higher-pitched click than the other beats, based on the detected time signature — same as a real metronome
   - **Merge click track into downloaded audio** — mixes the click track into the original MP3 instead of keeping it separate, written to `<filename>_<key>_<time signature>.mp3`, e.g. `Song Title_Cmaj_4-4.mp3`
   - **Metronome speed** — `1x` (as detected), `2x` (double time), or `1/2x` (half time): a manual override for the beat tracker's own "octave errors" (locking onto half or double the true tempo). Adjusts the displayed BPM and the click track's actual speed together, so they always agree
+  - **Time signature** — `Auto-detect`, or force `2/4` / `3/4` / `4/4` / `5/4` / `6/8` directly. The heuristic's classic failure is confusing **relative** signatures — the same beat grid grouped differently, especially 6/8 (two groups of three) vs. 3/4 (three groups of two) — so this lets you correct it by hand instead of fighting the detector; it changes where the metronome's downbeat accent falls
   - **No accents** — a flat metronome with every click identical, instead of accenting the downbeat of each bar
 - **Show suggested tempo (BPM)** — runs the same analysis and displays the estimated tempo, key, and time signature (e.g. `128.4 BPM · C Major · 4/4`) next to the checkbox, and logs them to the Output Log
   - Key is estimated with a Krumhansl-Schmuckler key-finding algorithm (chroma pitch-class profile correlated against major/minor key templates)
-  - Time signature is a best-effort heuristic (true time-signature detection is an open research problem) that looks for the beat-count-per-bar with the clearest recurring downbeat accent, defaulting to 4/4 — by far the most common signature — when the pattern is unclear
+  - Time signature is a best-effort heuristic (true time-signature detection is an open research problem) that looks for the beat-count-per-bar with the clearest recurring downbeat accent, defaulting to 4/4 — by far the most common signature — when the pattern is unclear. Live recordings, rubato, and quiet/ambient intros throw it off most; use the **Time signature** and **Metronome speed** overrides above to correct it
+- **↻ Regenerate click track…** — got the metronome wrong on a track you've already downloaded? Adjust Metronome speed / Time signature / No accents above, click this, and pick the file — it redoes just the tempo/key/time-signature analysis and click generation for that file (no re-download, no re-running Spleeter). Works on any local MP3/WAV/M4A/FLAC/OGG, not only ones downloaded through this app
+  - The button relabels itself to **↻ Regenerate merged audio (new metronome)…** whenever **Merge click track into downloaded audio** is checked — regenerating then also re-merges the corrected click track into a fresh copy of the audio, not just the standalone click file
 
 Settings → **Audio Tools** → **Separation & detection quality** exposes the real, no-training levers for better output on a given track (Spleeter and librosa aren't things this app retrains — Spleeter is a fixed pretrained model, and librosa's beat/key detection is signal processing, not a learned model — but both take tunable parameters):
 
@@ -236,6 +239,8 @@ dlp-ui/
 │   ├── widgets.py              #   PlaceholderEntry (tk.Entry subclass)
 │   ├── audio_tools.py          #   AudioToolsMixin — Spleeter split, tempo
 │   │                           #   detection, click-track generation
+│   ├── email_report.py         #   send_error_report() — SMTP email to the
+│   │                           #   developer after a failed download
 │   ├── tip_jar.py              #   TipJarMixin — the post-download tip popup
 │   ├── app.py                  #   App(tk.Tk, *Mixins) — window + wiring
 │   │
@@ -249,7 +254,7 @@ dlp-ui/
 │
 ├── DLP-UI.bat                  # Launcher — runs dlp-ui.ps1 via powershell.exe
 │
-├── build.bat                   # One-click PyInstaller build → dist\dlp-ui.exe
+├── build.bat                   # One-click PyInstaller build → dist\MD-Tools.exe
 ├── dlp-ui.spec                 # PyInstaller spec (--onefile --windowed, UPX on)
 ├── setup.cfg                   # flake8 config (max-line-length = 99)
 │
@@ -257,7 +262,7 @@ dlp-ui/
 │                                #   Stores: ytdlp_path, ffmpeg_path, python_path
 │
 ├── dist/
-│   └── dlp-ui.exe               # Compiled standalone executable (build output)
+│   └── MD-Tools.exe             # Compiled standalone executable (build output)
 │
 └── build/                       # PyInstaller intermediate artefacts (safe to delete)
 ```
@@ -311,7 +316,7 @@ pip install pyinstaller
 ### Option 1 — Compiled executable (recommended)
 
 ```
-dist\dlp-ui.exe
+dist\MD-Tools.exe
 ```
 
 No Python required. The exe is fully self-contained.
@@ -351,13 +356,13 @@ build.bat
 What it does:
 
 1. Checks whether `pyinstaller` is on `PATH`; installs it via `pip` if not
-2. Runs: `py -m PyInstaller --onefile --windowed --name "dlp-ui" dlp-ui.py`
+2. Runs: `py -m PyInstaller --onefile --windowed --name "MD-Tools" dlp-ui.py`
 3. Reports success or failure
 
 Output:
 
 ```
-dist\dlp-ui.exe     ← single portable executable (~10–15 MB with UPX)
+dist\MD-Tools.exe   ← single portable executable (~10–15 MB with UPX)
 ```
 
 To rebuild manually using the saved spec:
@@ -372,7 +377,7 @@ PyInstaller options baked into the spec:
 |---|---|---|
 | `--onefile` | true | Single `.exe`, no folder |
 | `--windowed` | true | No console window on launch |
-| `--name` | `dlp-ui` | Output filename |
+| `--name` | `MD-Tools` | Output filename |
 | `upx` | true | UPX compression applied to binary |
 | `console` | false | Suppresses black terminal window |
 
@@ -395,13 +400,13 @@ What it does:
 2. Runs `download_deps.py`, which downloads the official [`yt-dlp_macos`](https://github.com/yt-dlp/yt-dlp/releases) binary into `deps/yt-dlp`
 3. Builds `icon.icns` from `favicon.ico` (via Pillow + macOS's `iconutil`) if it doesn't already exist
 4. Runs `python3 -m PyInstaller dlp-ui-macos.spec`
-5. Zips the result as `dist/dlp-ui-macos-<arch>.zip` (`arm64` or `x86_64`, matching the build machine)
+5. Zips the result as `dist/MD-Tools-macos-<arch>.zip` (`arm64` or `x86_64`, matching the build machine)
 
 Output:
 
 ```
-dist/dlp-ui.app                       ← the app bundle
-dist/dlp-ui-macos-arm64.zip           ← zipped, ready to attach to a GitHub release
+dist/MD-Tools.app                     ← the app bundle
+dist/MD-Tools-macos-arm64.zip         ← zipped, ready to attach to a GitHub release
 ```
 
 ### Why ffmpeg isn't bundled on macOS
@@ -418,7 +423,7 @@ Settings → Audio Tools → **Auto-Setup Audio Tools** downloads a private, por
 
 ### Self-updating a macOS build
 
-Settings → App Update checks the GitHub releases API and looks for an asset named `dlp-ui-macos-<arch>.zip` (falling back to `dlp-ui-macos.zip`) — exactly what `build.sh` produces. If you're cutting releases, attach that zip (for each architecture you build) alongside the Windows `dlp-ui.exe`.
+Settings → App Update checks the GitHub releases API and looks for an asset named `MD-Tools-macos-<arch>.zip` (falling back to `MD-Tools-macos.zip`) — exactly what `build.sh` produces. If you're cutting releases, attach that zip (for each architecture you build) alongside the Windows `MD-Tools.exe`.
 
 ---
 
@@ -438,7 +443,7 @@ The Python version finds `yt-dlp.exe` automatically at startup using a priority 
      %USERPROFILE%\yt-dlp\yt-dlp.exe
      %USERPROFILE%\AppData\Local\Programs\yt-dlp\yt-dlp.exe
      %USERPROFILE%\AppData\Local\yt-dlp\yt-dlp.exe
-     <same folder as dlp-ui.exe>\yt-dlp.exe
+     <same folder as MD-Tools.exe>\yt-dlp.exe
           ↓ not found
 4. Path left empty — user must use Browse or Auto-detect in Settings
 ```
@@ -457,14 +462,14 @@ Any path set via the UI is immediately saved to `dlp-ui-config.json` so it persi
 
 ## 💾 Config Persistence
 
-`dlp-ui-config.json` is created next to `dlp-ui.py` (or `dlp-ui.exe` when compiled). It is plain JSON and safe to edit manually.
+`dlp-ui-config.json` is created next to `dlp-ui.py` (or `MD-Tools.exe` when compiled). It is plain JSON and safe to edit manually.
 
 **Location:**
 
 | Run mode | Config file location |
 |---|---|
 | `python dlp-ui.py` | Same directory as `dlp-ui.py` |
-| `dist\dlp-ui.exe` | Same directory as `dlp-ui.exe` |
+| `dist\MD-Tools.exe` | Same directory as `MD-Tools.exe` |
 
 **Schema:**
 
@@ -472,7 +477,12 @@ Any path set via the UI is immediately saved to `dlp-ui-config.json` so it persi
 {
   "ytdlp_path": "C:\\ERAR\\yt-dlp\\dist\\yt-dlp.exe",
   "ffmpeg_path": "C:\\ffmpeg\\ffmpeg.exe",
-  "python_path": "C:\\Python310\\python.exe"
+  "python_path": "C:\\Python310\\python.exe",
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "smtp_user": "you@gmail.com",
+  "smtp_password": "an app password, not your login password",
+  "developer_email": "developer@example.com"
 }
 ```
 
@@ -481,8 +491,13 @@ Any path set via the UI is immediately saved to `dlp-ui-config.json` so it persi
 | `ytdlp_path` | string | Absolute path to `yt-dlp.exe` chosen by the user or auto-detected |
 | `ffmpeg_path` | string | Absolute path to `ffmpeg.exe` chosen by the user or auto-detected |
 | `python_path` | string | Absolute path to the Python interpreter used to run Spleeter for audio splitting |
+| `smtp_host` / `smtp_port` | string / int | SMTP server for the **✉ Email to developer** button (Download tab, shown after a failed download) |
+| `smtp_user` / `smtp_password` | string | Sender account credentials — for Gmail this must be an [App Password](https://myaccount.google.com/apppasswords), not your real password |
+| `developer_email` | string | Where error reports get sent |
 
 > 💡 To reset to auto-detection on next launch, delete `dlp-ui-config.json` or clear the `ytdlp_path` value.
+
+> 🔒 **`dlp-ui-config.json` is gitignored and never committed** — it's the only place SMTP credentials live. Set them from Settings → Application → Error reporting (the password field is masked) rather than editing the file by hand where possible; either way, never paste real credentials into a file that isn't in `.gitignore`.
 
 ---
 

@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-echo === DLP-UI Build Script ===
+echo === MD Tools Build Script ===
 echo.
 
 REM ── Python ────────────────────────────────────────────────────────────────────
@@ -30,12 +30,12 @@ if errorlevel 1 (
 )
 
 REM ── Build ─────────────────────────────────────────────────────────────────────
-echo Building dlp-ui.exe...
+echo Building MD-Tools.exe...
 py -m PyInstaller dlp-ui.spec
 
 echo.
-if exist "dist\dlp-ui.exe" (
-    echo Build successful: dist\dlp-ui.exe
+if exist "dist\MD-Tools.exe" (
+    echo Build successful: dist\MD-Tools.exe
 ) else (
     echo Build may have failed. Check the output above.
 )
